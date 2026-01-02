@@ -1,0 +1,7 @@
+# iRacing Stats Calculator - Dependencias
+# Instalar con: pip install -r requirements.txt
+
+matplotlib>=3.5.0
+scikit-learn>=1.0.0
+numpy>=1.20.0
+joblib>=1.0.0
