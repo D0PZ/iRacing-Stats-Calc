@@ -7,67 +7,67 @@
   <img src="https://img.shields.io/badge/iRacing-Stats-orange.svg" alt="iRacing">
 </p>
 
-Una aplicación de escritorio completa para analizar y visualizar tus estadísticas de iRacing con **Machine Learning** integrado para predicciones inteligentes.
+A comprehensive desktop application to analyze and visualize your iRacing statistics with integrated **Machine Learning** for intelligent predictions.
 
 ![Dark Theme Interface](https://img.shields.io/badge/Theme-Dark%20Mode-0D1117?style=for-the-badge)
 
-## ✨ Características Principales
+## ✨ Main Features
 
-### 📊 Análisis de Estadísticas Completo
-- **Estadísticas generales**: Total de carreras, vueltas, incidentes, puntos de campeonato
-- **Posiciones**: Victorias, podios, Top 5, Top 10, DNFs
-- **Promedios**: Posición de salida, llegada, ganancia/pérdida de posiciones
-- **Consistency Score**: Mide tu regularidad usando desviación estándar
-- **Análisis por serie**: Estadísticas desglosadas por cada serie de iRacing
-- **Análisis por pista**: Rendimiento en cada circuito
+### 📊 Complete Statistics Analysis
+- **General statistics**: Total races, laps, incidents, championship points
+- **Positions**: Wins, podiums, Top 5, Top 10, DNFs
+- **Averages**: Starting position, finishing position, positions gained/lost
+- **Consistency Score**: Measures your regularity using standard deviation
+- **Series analysis**: Statistics broken down by each iRacing series
+- **Track analysis**: Performance at each circuit
 
-### 📈 Visualización de Datos
-- **Gráfico de tendencia de posiciones**: Evolución de tus posiciones de salida vs llegada
-- **Gráfico de incidentes**: Historial de incidentes por carrera con zonas de peligro
-- **Gráfico de puntos de campeonato**: Acumulación de puntos a lo largo del tiempo
-- **Análisis SOF (Strength of Field)**: Distribución de la dificultad de las carreras
-- **Gráficos interactivos** con tema oscuro integrado
+### 📈 Data Visualization
+- **Position trend chart**: Evolution of your starting vs finishing positions
+- **Incidents chart**: Incident history per race with danger zones
+- **Championship points chart**: Point accumulation over time
+- **SOF (Strength of Field) analysis**: Distribution of race difficulty
+- **Interactive charts** with integrated dark theme
 
-### 🤖 Machine Learning Integrado
-- **Predicción de posición**: El modelo aprende de tu historial para predecir tu próxima posición
-- **Predicción de incidentes**: Estima cuántos incidentes podrías tener
-- **Análisis de factores**: Identifica qué factores afectan más tu rendimiento
-- **Modelo persistente**: El modelo se guarda y mejora con cada sesión
-- **Insights inteligentes**: Recomendaciones personalizadas basadas en tus datos
+### 🤖 Integrated Machine Learning
+- **Position prediction**: The model learns from your history to predict your next position
+- **Incident prediction**: Estimates how many incidents you might have
+- **Factor analysis**: Identifies which factors affect your performance the most
+- **Persistent model**: The model saves and improves with each session
+- **Smart insights**: Personalized recommendations based on your data
 
-### 🎯 Sistema de Proyecciones
-- **Regresión lineal**: Proyecta tu rendimiento futuro
-- **Análisis de tendencias**: Detecta si estás mejorando, empeorando o estable
-- **Proyección de puntos**: Estima tus puntos futuros de campeonato
-- **Intervalos de confianza**: Rangos de predicción con niveles de certeza
+### 🎯 Projection System
+- **Linear regression**: Projects your future performance
+- **Trend analysis**: Detects if you're improving, declining, or stable
+- **Points projection**: Estimates your future championship points
+- **Confidence intervals**: Prediction ranges with certainty levels
 
-### 🎨 Interfaz Moderna
-- **Dark Mode nativo**: Tema oscuro profesional estilo GitHub
-- **Diseño responsive**: Se adapta a diferentes tamaños de ventana
-- **Navegación por pestañas**: Organización clara de información
-- **Tarjetas de estadísticas**: Visualización rápida de métricas clave
+### 🎨 Modern Interface
+- **Native Dark Mode**: Professional dark theme GitHub-style
+- **Responsive design**: Adapts to different window sizes
+- **Tab navigation**: Clear organization of information
+- **Stats cards**: Quick visualization of key metrics
 
-## 🚀 Instalación
+## 🚀 Installation
 
-### Requisitos
-- Python 3.8 o superior
+### Requirements
+- Python 3.8 or higher
 - Windows 10/11
 
-### Instalación desde código fuente
+### Installation from source
 
 ```bash
-# Clonar el repositorio
+# Clone the repository
 git clone https://github.com/D0PZ/iRacing-Stats-Calc.git
 cd iRacing-Stats-Calc
 
-# Instalar dependencias
+# Install dependencies
 pip install -r requirements.txt
 
-# Ejecutar la aplicación
+# Run the application
 python main.py
 ```
 
-### Dependencias
+### Dependencies
 ```
 matplotlib>=3.5.0
 scikit-learn>=1.0.0
@@ -75,112 +75,112 @@ numpy>=1.20.0
 joblib>=1.0.0
 ```
 
-## 📖 Uso
+## 📖 Usage
 
-### 1. Exportar datos desde iRacing
-1. Ve a [iRacing Members Site](https://members.iracing.com)
-2. Navega a **Stats** → **Series Stats**
-3. Selecciona la serie que quieres analizar
-4. Haz clic en **Export** para descargar el archivo JSON
+### 1. Export data from iRacing
+1. Go to [iRacing Members Site](https://members.iracing.com)
+2. Navigate to **Stats** → **Series Stats**
+3. Select the series you want to analyze
+4. Click **Export** to download the JSON file
 
-### 2. Cargar datos en la aplicación
-1. Abre iRacing Stats Calculator
-2. Haz clic en **📂 Cargar JSON**
-3. Selecciona el archivo exportado de iRacing
-4. ¡Explora tus estadísticas!
+### 2. Load data into the application
+1. Open iRacing Stats Calculator
+2. Click **📂 Load JSON**
+3. Select the exported file from iRacing
+4. Explore your statistics!
 
-### 3. Entrenar el modelo ML
-1. Ve a la pestaña **🤖 Machine Learning**
-2. Haz clic en **🎓 Entrenar Modelo**
-3. El modelo aprenderá de tus datos históricos
-4. Obtén predicciones y recomendaciones personalizadas
+### 3. Train the ML model
+1. Go to the **🤖 Machine Learning** tab
+2. Click **🎓 Train Model**
+3. The model will learn from your historical data
+4. Get personalized predictions and recommendations
 
-## 🛠️ Estructura del Proyecto
+## 🛠️ Project Structure
 
 ```
 iRacing-Stats-Calc/
-├── main.py                 # Punto de entrada
-├── requirements.txt        # Dependencias
-├── README.md              # Documentación
+├── main.py                 # Entry point
+├── requirements.txt        # Dependencies
+├── README.md              # Documentation
 ├── app/
 │   ├── __init__.py
-│   ├── gui.py             # Interfaz gráfica (Tkinter)
-│   ├── data_loader.py     # Carga y parseo de datos JSON
-│   ├── stats_calculator.py # Cálculos estadísticos
-│   ├── projections.py     # Motor de proyecciones
-│   ├── charts.py          # Generador de gráficos (Matplotlib)
-│   └── ml_engine.py       # Motor de Machine Learning
-└── build/                 # Archivos de compilación
+│   ├── gui.py             # Graphical interface (Tkinter)
+│   ├── data_loader.py     # JSON data loading and parsing
+│   ├── stats_calculator.py # Statistical calculations
+│   ├── projections.py     # Projection engine
+│   ├── charts.py          # Chart generator (Matplotlib)
+│   └── ml_engine.py       # Machine Learning engine
+└── build/                 # Build files
 ```
 
-## 📊 Estadísticas Calculadas
+## 📊 Calculated Statistics
 
-| Métrica | Descripción |
-|---------|-------------|
-| Total Races | Número total de carreras |
-| Wins | Victorias (P1) |
-| Podiums | Posiciones 1-3 |
-| Top 5 / Top 10 | Posiciones dentro del top |
-| DNFs | Carreras no terminadas |
-| Avg Finish | Promedio de posición de llegada |
-| Avg Start | Promedio de posición de salida |
-| Avg Gain | Promedio de posiciones ganadas/perdidas |
-| Avg Incidents | Promedio de incidentes por carrera |
-| Consistency | Desviación estándar de posiciones |
-| Laps Led | Vueltas lideradas |
-| Championship Points | Puntos totales de campeonato |
+| Metric | Description |
+|--------|-------------|
+| Total Races | Total number of races |
+| Wins | Victories (P1) |
+| Podiums | Positions 1-3 |
+| Top 5 / Top 10 | Positions within the top |
+| DNFs | Did Not Finish races |
+| Avg Finish | Average finishing position |
+| Avg Start | Average starting position |
+| Avg Gain | Average positions gained/lost |
+| Avg Incidents | Average incidents per race |
+| Consistency | Standard deviation of positions |
+| Laps Led | Laps led |
+| Championship Points | Total championship points |
 
-## 🤖 Modelos de Machine Learning
+## 🤖 Machine Learning Models
 
-La aplicación utiliza varios algoritmos de scikit-learn:
+The application uses several scikit-learn algorithms:
 
-- **Random Forest Regressor**: Predicción principal de posición
-- **Gradient Boosting Regressor**: Modelo alternativo de alto rendimiento
-- **Linear Regression**: Base para comparación y proyecciones
-- **K-Means Clustering**: Agrupación de tipos de carreras
+- **Random Forest Regressor**: Main position prediction
+- **Gradient Boosting Regressor**: High-performance alternative model
+- **Linear Regression**: Base for comparison and projections
+- **K-Means Clustering**: Race type grouping
 
-### Características del modelo
-- Persistencia automática del modelo entrenado
-- Historial de entrenamientos
-- Métricas de precisión y confianza
-- Importancia de características
+### Model Features
+- Automatic persistence of trained model
+- Training history
+- Accuracy and confidence metrics
+- Feature importance
 
-## 🔧 Compilar Ejecutable
+## 🔧 Build Executable
 
-Para crear un ejecutable standalone:
+To create a standalone executable:
 
 ```bash
-# Instalar PyInstaller
+# Install PyInstaller
 pip install pyinstaller
 
-# Compilar
+# Build
 python build_exe.py
 ```
 
-El ejecutable se generará en la carpeta `dist/`.
+The executable will be generated in the `dist/` folder.
 
-## 🤝 Contribuir
+## 🤝 Contributing
 
-Las contribuciones son bienvenidas. Por favor:
+Contributions are welcome! Please:
 
-1. Fork el repositorio
-2. Crea una rama para tu feature (`git checkout -b feature/NuevaCaracteristica`)
-3. Commit tus cambios (`git commit -m 'Añadir nueva característica'`)
-4. Push a la rama (`git push origin feature/NuevaCaracteristica`)
-5. Abre un Pull Request
+1. Fork the repository
+2. Create a branch for your feature (`git checkout -b feature/NewFeature`)
+3. Commit your changes (`git commit -m 'Add new feature'`)
+4. Push to the branch (`git push origin feature/NewFeature`)
+5. Open a Pull Request
 
-## 📝 Licencia
+## 📝 License
 
-Este proyecto está bajo la Licencia MIT. Ver el archivo `LICENSE` para más detalles.
+This project is under the MIT License. See the `LICENSE` file for more details.
 
-## 🙏 Agradecimientos
+## 🙏 Acknowledgments
 
-- [iRacing](https://www.iracing.com/) por la plataforma y la API de datos
-- [Matplotlib](https://matplotlib.org/) para visualizaciones
-- [scikit-learn](https://scikit-learn.org/) para Machine Learning
+- [iRacing](https://www.iracing.com/) for the platform and data API
+- [Matplotlib](https://matplotlib.org/) for visualizations
+- [scikit-learn](https://scikit-learn.org/) for Machine Learning
 
 ---
 
 <p align="center">
-  Hecho con ❤️ para la comunidad de iRacing
+  Made with ❤️ for the iRacing community
 </p>
