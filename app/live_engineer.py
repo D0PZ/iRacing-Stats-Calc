@@ -222,6 +222,8 @@ class LiveEngineer:
         self.ir = irsdk.IRSDK() if IRSDK_AVAILABLE else None
         self._stop = threading.Event()
         self.questions: "queue.Queue[str]" = queue.Queue()
+        self.event_fuel: deque = deque(maxlen=10)   # litros por vuelta medidos en este evento
+        self.briefed_sessions = set()
         self.muted_until = 0.0
         self.last_spoken = ""
         self.on_track = False
@@ -435,6 +437,92 @@ class LiveEngineer:
     def zone_name(self, seg: int) -> str:
         return self.corner_at((seg + 0.5) / N_SEGMENTS)
 
+    # ------------------------------------------- briefing y plan de carrera
+    def fuel_per_lap_estimate(self) -> Optional[float]:
+        """Consumo de este evento (mediana) o el guardado del análisis de .ibt de esta pista y auto"""
+        if len(self.event_fuel) >= 2:
+            vals = sorted(self.event_fuel)
+            return vals[len(vals) // 2]
+        if self.refs and self.refs.get("fuel_per_lap"):
+            return float(self.refs["fuel_per_lap"])
+        return None
+
+    def race_plan(self) -> Optional[dict]:
+        """Vueltas de la carrera del evento y combustible necesario para hacerla sin parar"""
+        try:
+            sessions = self.ir["SessionInfo"]["Sessions"]
+            race = next(x for x in sessions if "race" in str(x.get("SessionType", "")).lower())
+        except Exception:
+            return None
+        laps = None
+        raw_laps = str(race.get("SessionLaps", ""))
+        if raw_laps.isdigit():
+            laps = int(raw_laps)
+        else:
+            secs = self._nums(race.get("SessionTime", ""))
+            if secs:
+                laps = math.ceil(secs[0] / self.ref_lap()) + 1
+        per_lap = self.fuel_per_lap_estimate()
+        if not laps:
+            return None
+        need = per_lap * (laps + 1) + 0.5 if per_lap else None   # +1 vuelta de formación, +0.5 L de margen
+        return {"laps": laps, "per_lap": per_lap, "need": need}
+
+    def _setup_fuel(self) -> Optional[float]:
+        try:
+            for path, value in self._walk(self.ir["CarSetup"] or {}):
+                if path and path[-1] == "FuelLevel":
+                    v = self._nums(value)
+                    return v[0] if v else None
+        except Exception:
+            pass
+        return None
+
+    def _check_briefing(self):
+        if not self.on_track:
+            return
+        ir = self.ir
+        plan = self.race_plan()
+        key = (self.track_name, self.session_num)
+        if key in self.briefed_sessions or not plan:
+            return
+        state = ir["SessionState"] or 0
+        if self.is_race:
+            if state > irsdk.SessionState.parade_laps:
+                return
+            self.briefed_sessions.add(key)
+            self.emit(self._briefing_text(plan), P_FLAG, ttl=60)
+        elif plan["need"]:
+            # Práctica o clasificación: avisar si el setup no trae combustible para la carrera
+            setup_fuel = self._setup_fuel()
+            if setup_fuel is not None and setup_fuel + 0.1 < plan["need"]:
+                self.briefed_sessions.add(key)
+                self.emit(f"Ojo con la carrera: son {plan['laps']} vueltas, gastas {plan['per_lap']:.2f} litros "
+                          f"por vuelta y tu setup tiene {setup_fuel:.0f} litros. Para no parar necesitas "
+                          f"{plan['need']:.0f}. Cámbialo en el garage antes de la carrera.", P_FLAG, ttl=60)
+
+    def _briefing_text(self, plan: dict) -> str:
+        ir = self.ir
+        parts = [f"Briefing: {plan['laps']} vueltas."]
+        fuel = ir["FuelLevel"] or 0.0
+        if plan["need"]:
+            if fuel + 0.1 < plan["need"]:
+                laps_fuel = fuel / plan["per_lap"]
+                parts.append(f"Llevas {fuel:.0f} litros y necesitas {plan['need']:.0f}: alcanza para unas "
+                             f"{laps_fuel:.0f} vueltas, vas a tener que parar o ahorrar.")
+            else:
+                parts.append(f"Combustible bien: {fuel:.0f} litros, te sobran {fuel - plan['need'] + 0.5:.1f}.")
+        if self.limits and self.limits.zones:
+            hot = sorted(self.limits.zones, key=lambda z: -z.get("offs", 0))[:2]
+            hot = [z for z in hot if z.get("offs", 0) >= 2]
+            if hot:
+                parts.append("Cuidado con los límites " + " y ".join(self._zone_name(z) for z in hot) + ".")
+        temp = ir["TrackTempCrew"]
+        if temp is not None:
+            parts.append(f"Pista a {temp:.0f} grados.")
+        parts.append(f"Paciencia en la primera curva. Vamos, {self.name}.")
+        return " ".join(parts)
+
     # ------------------------------------------------ grabación automática
     def _auto_recording(self):
         """Graba telemetría a disco mientras estás en el auto (sin Alt+L) y la cierra al bajarte"""
@@ -524,6 +612,8 @@ class LiveEngineer:
         try:
             name = str(self.ir["WeekendInfo"]["TrackDisplayName"])
             if name and name != self.track_name:
+                if self.track_name:
+                    self.event_fuel.clear()   # otra pista: el consumo medido ya no sirve
                 self.track_name = name
                 self.limits = load_tracker(name, self.track_len)
                 self.zone_state = {}
@@ -624,6 +714,7 @@ class LiveEngineer:
         if self._tick_n % SLOW_EVERY == 0:
             self._check_traffic()
             self._check_weather()
+            self._check_briefing()
         self._check_lap_complete()
         self._check_incidents_and_warnings()
 
@@ -961,6 +1052,8 @@ class LiveEngineer:
         best_prev = min((l["time"] for l in self.my_laps if l["time"] > 0), default=None)
         if clean and best_prev and lap_time > best_prev * 1.04:
             clean = False
+        if used > 0.2 and not st["pit"] and not st["yellow"]:
+            self.event_fuel.append(used)
         self.my_laps.append({"time": lap_time if clean else -1, "raw": lap_time,
                              "fuel": used if used > 0 and not st["pit"] else None, **st})
         self.fuel_at_lap_start = fuel
@@ -1515,6 +1608,15 @@ class LiveEngineer:
                 return "Sin daño registrado. El auto está entero."
             return "Daño: " + ", ".join(parts) + ". " + (
                 "La obligatoria hay que hacerla en pits." if rep_t > 0 else "Puedes seguir, la opcional es para recuperar rendimiento.")
+
+        if has("para la carrera", "cargar para", "cuanto cargo", "cuanto combustible cargo"):
+            plan = self.race_plan()
+            if not plan:
+                return "No veo una carrera en este evento."
+            if not plan["need"]:
+                return f"La carrera es de {plan['laps']} vueltas. Haz un par de vueltas para medir el consumo."
+            return (f"La carrera es de {plan['laps']} vueltas. Gastas {plan['per_lap']:.2f} litros por vuelta: "
+                    f"carga {plan['need']:.0f} litros para hacerla sin parar.")
 
         if has("combustible", "gasolina", "bencina", "nafta", "fuel", "litros"):
             fuel, per_lap, left = self._fuel_numbers()

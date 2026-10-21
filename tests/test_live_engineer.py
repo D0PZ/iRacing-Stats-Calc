@@ -193,3 +193,42 @@ def test_auto_recording_respects_manual_logging(eng):
     for _ in range(61):
         tick(eng)
     assert eng.ir.commands == []
+
+
+def _event(eng, current):
+    """Evento con práctica y carrera de 12 vueltas; consumo de 3.09 L/vuelta como en COTA"""
+    eng.ir.v["SessionInfo"] = {"Sessions": [{"SessionType": "Practice"},
+                                            {"SessionType": "Race", "SessionLaps": "12"}]}
+    eng.ir.v["SessionNum"] = current
+    eng.ir.v["CarSetup"] = {"Chassis": {"Front": {"FuelLevel": "12.0 L"}}}
+    eng.refs = {"fuel_per_lap": 3.09, "corners": []}
+
+
+def test_setup_fuel_warning_in_practice(eng):
+    tick(eng)
+    _event(eng, current=0)
+    eng.is_race = False
+    for _ in range(12):
+        tick(eng)
+    warn = [t for t in texts(eng) if "Ojo con la carrera" in t]
+    assert len(warn) == 1, texts(eng)
+    assert "12 litros" in warn[0] and "41" in warn[0]          # 3.09 * 13 + 0.5 = 40.7
+
+
+def test_race_briefing_on_grid(eng):
+    tick(eng)
+    _event(eng, current=1)
+    eng.is_race = True
+    for _ in range(12):
+        tick(eng, SessionState=int(le.irsdk.SessionState.parade_laps), FuelLevel=12.0)
+    brief = [t for t in texts(eng) if t.startswith("Briefing")]
+    assert len(brief) == 1, texts(eng)
+    assert "12 vueltas" in brief[0] and "parar" in brief[0]
+
+
+def test_race_fuel_question(eng):
+    tick(eng)
+    _event(eng, current=0)
+    eng.ask("¿cuánto cargo para la carrera?")
+    tick(eng)
+    assert "carga 41 litros" in texts(eng)[-1]

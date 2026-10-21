@@ -19,12 +19,14 @@ def path_for(track: str, car: str) -> str:
     return os.path.join(BASE, f"{_slug(track)}__{_slug(car)}.json")
 
 
-def save_references(track: str, car: str, track_len: float, corners) -> Optional[str]:
-    """corners: CornerResult del analizador"""
+def save_references(track: str, car: str, track_len: float, corners,
+                    fuel_per_lap: float = 0.0) -> Optional[str]:
+    """corners: CornerResult del analizador; fuel_per_lap: consumo medido (L/vuelta)"""
     if not corners:
         return None
     os.makedirs(BASE, exist_ok=True)
-    data = {"track": track, "car": car, "track_len": track_len, "corners": [
+    data = {"track": track, "car": car, "track_len": track_len,
+            "fuel_per_lap": round(fuel_per_lap, 3) if fuel_per_lap else None, "corners": [
         {"n": c.number, "apex_m": c.apex_m, "brake_at_m": c.brake_at_m, "brake_m_before": c.brake_m_best,
          "brake_peak": c.brake_peak_best, "min_kmh": c.min_speed_best, "gear": c.gear,
          "throttle_m": c.throttle_m_best, "kind": c.kind}

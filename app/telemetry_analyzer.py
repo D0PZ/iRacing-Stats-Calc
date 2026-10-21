@@ -259,7 +259,7 @@ class TelemetryAnalyzer:
         self._limit_recs()
         res.recommendations.sort(key=lambda r: r.priority)
         try:
-            save_references(res.track, res.car, res.track_len, res.corners)
+            save_references(res.track, res.car, res.track_len, res.corners, res.fuel_per_lap)
         except Exception:
             pass
         return res
