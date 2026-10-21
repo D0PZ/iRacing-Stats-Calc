@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from app.ibt_reader import telemetry_dir
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
 
 PRIORITY_LABEL = {1: "ALTA", 2: "MEDIA", 3: "INFO"}
@@ -20,11 +21,8 @@ VOICES = [DEFAULT_VOICE, "es-CL-CatalinaNeural", "es-AR-TomasNeural", "es-AR-Ele
 
 
 def default_telemetry_dir() -> str:
-    for base in (os.path.expanduser("~/Documents"), os.path.expanduser("~/OneDrive/Documents")):
-        path = os.path.join(base, "iRacing", "telemetry")
-        if os.path.isdir(path):
-            return path
-    return os.path.expanduser("~")
+    path = telemetry_dir()
+    return path if os.path.isdir(path) else os.path.expanduser("~")
 
 
 class TelemetryView:

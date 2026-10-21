@@ -57,7 +57,8 @@ def eng(monkeypatch, tmp_path):
     monkeypatch.setattr(le, "load_tracker", lambda name, length: TrackLimitTracker(length))
     monkeypatch.setattr(le, "save_tracker", lambda *a, **k: None)
     msgs = []
-    e = le.LiveEngineer(speak=False, neural_voice=None, on_message=lambda t, p: msgs.append((t, p)))
+    e = le.LiveEngineer(speak=False, neural_voice=None, on_message=lambda t, p: msgs.append((t, p)),
+                        auto_analysis=False)
     e.ir = FakeIR()
     e.connected = True
     e.msgs = msgs

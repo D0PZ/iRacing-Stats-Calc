@@ -4,6 +4,7 @@ Formato: cabecera irsdk + sub-cabecera de disco + definiciones de variables
 + YAML de sesión + registros de datos a 60 Hz.
 """
 
+import os
 import struct
 from typing import Dict, Optional
 
@@ -113,3 +114,13 @@ def parse_session_yaml(text: str) -> dict:
             return yaml.load("\n".join(fixed), Loader=loader) or {}
         except yaml.YAMLError:
             return {}
+
+
+def telemetry_dir() -> str:
+    """Carpeta donde iRacing guarda los .ibt (Documentos normal o redirigido a OneDrive)"""
+    for base in (os.path.expanduser("~/Documents"), os.path.expanduser("~/OneDrive/Documents"),
+                 os.path.expanduser("~/OneDrive/Documentos")):
+        path = os.path.join(base, "iRacing", "telemetry")
+        if os.path.isdir(path):
+            return path
+    return os.path.join(os.path.expanduser("~/Documents"), "iRacing", "telemetry")

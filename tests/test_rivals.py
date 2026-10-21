@@ -27,7 +27,8 @@ class Race:
         monkeypatch.setattr(le, "load_tracker", lambda name, length: TrackLimitTracker(length))
         monkeypatch.setattr(le, "save_tracker", lambda *a, **k: None)
         self.msgs = []
-        self.e = le.LiveEngineer(speak=False, neural_voice=None, on_message=lambda t, p: self.msgs.append(t))
+        self.e = le.LiveEngineer(speak=False, neural_voice=None, on_message=lambda t, p: self.msgs.append(t),
+                                 auto_analysis=False)
         drivers = [{"CarIdx": i, "CarNumber": str(10 + i), "CarClassID": c.get("cls", 1)} for i, c in enumerate(cars)]
         self.ir = FakeIR(DriverInfo={"DriverCarIdx": 0, "DriverCarEstLapTime": 80.0, "Drivers": drivers})
         self.e.ir = self.ir

@@ -214,7 +214,7 @@ class LiveEngineer:
     def __init__(self, driver_name: str = "Diego", speak: bool = True,
                  neural_voice: Optional[str] = DEFAULT_NEURAL_VOICE,
                  on_message: Optional[Callable[[str, int], None]] = None,
-                 log_path: Optional[str] = None):
+                 log_path: Optional[str] = None, auto_analysis: bool = True):
         self.name = driver_name
         self.voice = Voice(enabled=speak, neural_voice=neural_voice)
         self.on_message = on_message
@@ -224,6 +224,13 @@ class LiveEngineer:
         self.questions: "queue.Queue[str]" = queue.Queue()
         self.muted_until = 0.0
         self.last_spoken = ""
+        self.on_track = False
+        self._reload_track_data = False
+        self._last_poll = 0.0
+        self.auto = None
+        if auto_analysis:
+            from app.auto_analysis import AutoAnalyzer
+            self.auto = AutoAnalyzer(self._analysis_done)
         self.reset_session()
 
     # ------------------------------------------------------------------ util
@@ -425,6 +432,13 @@ class LiveEngineer:
     def zone_name(self, seg: int) -> str:
         return self.corner_at((seg + 0.5) / N_SEGMENTS)
 
+    # ------------------------------------------------ análisis automático
+    def _analysis_done(self, res, report_path: str):
+        from app.auto_analysis import spoken_summary
+        print(f"[análisis] reporte guardado en {report_path}", flush=True)
+        self.emit(spoken_summary(res), P_INFO, ttl=120)
+        self._reload_track_data = True
+
     # ------------------------------------------------------------ main loop
     def run(self):
         if not IRSDK_AVAILABLE:
@@ -444,6 +458,9 @@ class LiveEngineer:
                         self.questions.get()
                         self.emit("Todavía no estoy conectado a iRacing.", P_BATTLE + 5, ttl=10)
                     time.sleep(1.0)
+                if self.auto is not None and time.time() - self._last_poll > 30:
+                    self._last_poll = time.time()
+                    self.auto.poll(can_run=not self.connected or not self.on_track)
             except Exception as e:
                 print(f"[error] {e}", flush=True)
                 time.sleep(0.05)
@@ -527,6 +544,15 @@ class LiveEngineer:
             self.dt = t - self._last_t
         self._last_t = t
         self._tick_n += 1
+        self.on_track = bool(ir["IsOnTrack"])
+        if self._reload_track_data:
+            # El análisis automático actualizó referencias y límites: recargarlos
+            self._reload_track_data = False
+            self.track_name = self.car_name = ""
+            self.refs = None
+            self.limits_dirty = False
+            self.session_info_tick = -1
+            self._refresh_session_info()
         while not self.questions.empty():
             q = self.questions.get()
             try:
