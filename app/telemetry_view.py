@@ -383,7 +383,8 @@ class LiveEngineerView:
                                      log_path=os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt")))
         if self.ptt is None:
             self.ptt = PushToTalk(on_text=lambda t: self.engineer and self.engineer.ask(t),
-                                  on_error=lambda m: self.engineer and self.engineer.emit(m, P_BATTLE + 5, ttl=6),
+                                  on_error=lambda m: self.engineer and self.engineer.emit(m, P_BATTLE + 5, ttl=6,
+                                                                                          always=True),
                                   config=cfg)
             self.ptt.start()
         self.thread = threading.Thread(target=self.engineer.run, daemon=True)

@@ -222,6 +222,7 @@ class LiveEngineer:
         self.ir = irsdk.IRSDK() if IRSDK_AVAILABLE else None
         self._stop = threading.Event()
         self.questions: "queue.Queue[str]" = queue.Queue()
+        self._emit_lock = threading.RLock()
         self.event_fuel: deque = deque(maxlen=10)   # litros por vuelta medidos en este evento
         self.briefed_sessions = set()
         self.muted_until = 0.0
@@ -317,34 +318,36 @@ class LiveEngineer:
                 "entry_slides": [], "exit_slides": [], "entry_under": [], "mid_under": [], "spin_pcts": []}
 
     def emit(self, text: str, priority: int = P_INFO, key: Optional[str] = None,
-             cooldown: float = 0.0, ttl: float = 8.0):
-        now = time.time()
-        if key:
-            if self.cooldowns.get(key, 0) > now:
-                return
-            self.cooldowns[key] = now + cooldown
-        self.last_emit = now
-        stamp = time.strftime("%H:%M:%S")
-        line = f"[{stamp}] {text}"
-        print(line, flush=True)
-        if self.log_file:
-            self.log_file.write(line + "\n")
-            self.log_file.flush()
-        if self.on_message:
-            try:
-                self.on_message(text, priority)
-            except Exception:
-                pass
-        if now < self.muted_until and priority < P_FLAG:
-            return  # modo silencio: solo peligros, banderas y respuestas
-        self.last_spoken = text
-        self.voice.say(text, priority, ttl)
+             cooldown: float = 0.0, ttl: float = 8.0, always: bool = False):
+        """always=True: respuestas a tus preguntas, suenan aunque estés en modo silencio"""
+        with self._emit_lock:
+            now = time.time()
+            if key:
+                if self.cooldowns.get(key, 0) > now:
+                    return
+                self.cooldowns[key] = now + cooldown
+            self.last_emit = now
+            line = f"[{time.strftime('%H:%M:%S')}] {text}"
+            print(line, flush=True)
+            if self.log_file:
+                self.log_file.write(line + "\n")
+                self.log_file.flush()
+            if self.on_message:
+                try:
+                    self.on_message(text, priority)
+                except Exception:
+                    pass
+            if now < self.muted_until and priority < P_FLAG and not always:
+                return  # modo silencio: solo peligros, banderas y respuestas
+            self.last_spoken = text
+            self.voice.say(text, priority, ttl)
 
     def ask(self, text: str):
         """Pregunta del piloto (desde el push-to-talk); se responde en el hilo de telemetría"""
         print(f"[pregunta] {text}", flush=True)
-        if self.log_file:
-            self.log_file.write(f"[{time.strftime('%H:%M:%S')}] [pregunta] {text}\n")
+        with self._emit_lock:
+            if self.log_file:
+                self.log_file.write(f"[{time.strftime('%H:%M:%S')}] [pregunta] {text}\n")
         self.questions.put(text)
 
     def car_label(self, idx: int) -> str:
@@ -548,6 +551,14 @@ class LiveEngineer:
                 self._we_record = False
                 print("[telemetría] grabación cerrada, se analizará automáticamente", flush=True)
 
+    def _save_limits(self):
+        if self.limits is not None and self.limits_dirty and self.track_name:
+            try:
+                save_tracker(self.track_name, self.limits)
+                self.limits_dirty = False
+            except OSError as e:
+                print(f"[límites] no se pudieron guardar: {e}", flush=True)
+
     # ------------------------------------------------ análisis automático
     def _analysis_done(self, res, report_path: str):
         from app.auto_analysis import spoken_summary
@@ -572,7 +583,7 @@ class LiveEngineer:
                 else:
                     while not self.questions.empty():
                         self.questions.get()
-                        self.emit("Todavía no estoy conectado a iRacing.", P_BATTLE + 5, ttl=10)
+                        self.emit("Todavía no estoy conectado a iRacing.", P_BATTLE + 5, ttl=10, always=True)
                     time.sleep(1.0)
                 if self.auto is not None and time.time() - self._last_poll > 30:
                     self._last_poll = time.time()
@@ -580,8 +591,7 @@ class LiveEngineer:
             except Exception as e:
                 print(f"[error] {e}", flush=True)
                 time.sleep(0.05)
-        if self.limits is not None and self.limits_dirty:
-            save_tracker(self.track_name, self.limits)
+        self._save_limits()
         self.voice.stop()
 
     def stop(self):
@@ -590,6 +600,7 @@ class LiveEngineer:
     def _check_connection(self):
         if self.connected and not (self.ir.is_initialized and self.ir.is_connected):
             self._we_record = False
+            self._save_limits()
             self.ir.shutdown()
             self.reset_session()
             print("iRacing desconectado.", flush=True)
@@ -680,7 +691,7 @@ class LiveEngineer:
             except Exception as e:
                 answer = "No tengo ese dato ahora."
                 print(f"[pregunta] error: {e}", flush=True)
-            self.emit(answer, P_BATTLE + 5, ttl=20)
+            self.emit(answer, P_BATTLE + 5, ttl=20, always=True)
 
         num = ir["SessionNum"]
         if num != self.session_num:
@@ -2004,7 +2015,8 @@ def main():
                        neural_voice=None if args.voz_windows else voice, log_path=log_path,
                        auto_record=not args.sin_grabar)
     if not args.sin_ptt:
-        ptt = PushToTalk(on_text=eng.ask, on_error=lambda m: eng.emit(m, P_BATTLE + 5, ttl=6), config=cfg)
+        ptt = PushToTalk(on_text=eng.ask, on_error=lambda m: eng.emit(m, P_BATTLE + 5, ttl=6, always=True),
+                         config=cfg)
         ptt.start()
     try:
         eng.run()

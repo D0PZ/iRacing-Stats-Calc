@@ -232,3 +232,28 @@ def test_race_fuel_question(eng):
     eng.ask("¿cuánto cargo para la carrera?")
     tick(eng)
     assert "carga 41 litros" in texts(eng)[-1]
+
+
+def test_answers_are_spoken_while_muted(eng):
+    tick(eng)
+    eng.ask("silencio")
+    tick(eng)
+    while not eng.voice.q.empty():
+        eng.voice.q.get()
+    eng.ask("¿cuántas vueltas faltan?")
+    tick(eng)
+    queued = []
+    while not eng.voice.q.empty():
+        queued.append(eng.voice.q.get().text)
+    assert any("Quedan 8 vueltas" in q for q in queued)
+
+
+def test_learned_limits_saved_on_disconnect(eng, monkeypatch):
+    saved = []
+    monkeypatch.setattr(le, "save_tracker", lambda name, tr: saved.append(name))
+    tick(eng)
+    eng.limits_dirty = True
+    eng.ir.is_initialized, eng.ir.is_connected = True, False
+    eng.ir.shutdown = lambda: None
+    eng._check_connection()
+    assert saved == ["Pista de Prueba"]
