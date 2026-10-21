@@ -26,6 +26,7 @@ class FakeIR:
             "EngineWarnings": 0, "PitRepairLeft": 0.0, "PitOptRepairLeft": 0.0, "dcBrakeBias": 54.5,
             "dcTractionControl": 3.0, "dcABS": 2.0, "SessionLapsRemainEx": 8, "SessionTimeRemain": 600.0,
             "WaterTemp": 90.0, "OilTemp": 105.0, "OilPress": 5.0, "VelocityX": 40.0, "VelocityY": 0.0,
+            "IsDiskLoggingEnabled": True, "IsDiskLoggingActive": False,
             "CarIdxLap": [3] * n, "CarIdxLapDistPct": [-1.0] * n, "CarIdxLastLapTime": [-1.0] * n,
             "CarIdxClassPosition": [0] * n, "CarIdxTrackSurface": [-1] * n, "CarIdxOnPitRoad": [False] * n,
             "CarIdxBestLapTime": [-1.0] * n, "CarIdxEstTime": [0.0] * n,
@@ -40,12 +41,17 @@ class FakeIR:
         self.v["CarIdxClassPosition"][0] = 2
         self.v["CarIdxTrackSurface"][0] = 3
         self.v.update(overrides)
+        self.commands = []
 
     def __getitem__(self, k):
         return self.v.get(k)
 
     def freeze_var_buffer_latest(self):
         pass
+
+    def telem_command(self, mode):
+        self.commands.append(mode)
+        self.v["IsDiskLoggingActive"] = mode == le.irsdk.TelemCommandMode.start
 
     def unfreeze_var_buffer_latest(self):
         pass
@@ -164,3 +170,26 @@ def test_corner_reference_question(eng):
     tick(eng)
     out = texts(eng)[-1]
     assert "metro 880" in out and "120 metros antes" in out and "85" in out
+
+
+def test_auto_recording_starts_in_car_and_stops_after_leaving(eng, monkeypatch):
+    start, stop = le.irsdk.TelemCommandMode.start, le.irsdk.TelemCommandMode.stop
+    for _ in range(61):
+        tick(eng)                                   # en el auto: inicia la grabación
+    assert eng.ir.commands == [start]
+    clock = [1000.0]
+    monkeypatch.setattr(le.time, "time", lambda: clock[0])
+    tick(eng, IsOnTrack=False)                      # se baja del auto
+    clock[0] += 3
+    tick(eng)
+    assert eng.ir.commands == [start]               # todavía no: espera 5 s
+    clock[0] += 3
+    tick(eng)
+    assert eng.ir.commands == [start, stop]
+
+
+def test_auto_recording_respects_manual_logging(eng):
+    eng.ir.v["IsDiskLoggingActive"] = True          # ya grabando con Alt+L
+    for _ in range(61):
+        tick(eng)
+    assert eng.ir.commands == []

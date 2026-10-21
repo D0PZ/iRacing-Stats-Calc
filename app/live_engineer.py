@@ -214,7 +214,7 @@ class LiveEngineer:
     def __init__(self, driver_name: str = "Diego", speak: bool = True,
                  neural_voice: Optional[str] = DEFAULT_NEURAL_VOICE,
                  on_message: Optional[Callable[[str, int], None]] = None,
-                 log_path: Optional[str] = None, auto_analysis: bool = True):
+                 log_path: Optional[str] = None, auto_analysis: bool = True, auto_record: bool = True):
         self.name = driver_name
         self.voice = Voice(enabled=speak, neural_voice=neural_voice)
         self.on_message = on_message
@@ -225,6 +225,9 @@ class LiveEngineer:
         self.muted_until = 0.0
         self.last_spoken = ""
         self.on_track = False
+        self.auto_record = auto_record
+        self._we_record = False          # la grabación la inició el ingeniero
+        self._off_track_since: Optional[float] = None
         self._reload_track_data = False
         self._last_poll = 0.0
         self.auto = None
@@ -432,6 +435,31 @@ class LiveEngineer:
     def zone_name(self, seg: int) -> str:
         return self.corner_at((seg + 0.5) / N_SEGMENTS)
 
+    # ------------------------------------------------ grabación automática
+    def _auto_recording(self):
+        """Graba telemetría a disco mientras estás en el auto (sin Alt+L) y la cierra al bajarte"""
+        if not self.auto_record:
+            return
+        ir = self.ir
+        active = ir["IsDiskLoggingActive"]
+        if active is None or not ir["IsDiskLoggingEnabled"]:
+            return  # iRacing con la telemetría de disco desactivada (irsdkEnableDisk=0)
+        if self.on_track:
+            self._off_track_since = None
+            if not active and self._tick_n % 60 == 0:   # reintentar como mucho una vez por segundo
+                ir.telem_command(irsdk.TelemCommandMode.start)
+                if not self._we_record:
+                    self._we_record = True
+                    print("[telemetría] grabación iniciada", flush=True)
+        else:
+            now = time.time()
+            if self._off_track_since is None:
+                self._off_track_since = now
+            elif now - self._off_track_since > 5 and self._we_record and active:
+                ir.telem_command(irsdk.TelemCommandMode.stop)
+                self._we_record = False
+                print("[telemetría] grabación cerrada, se analizará automáticamente", flush=True)
+
     # ------------------------------------------------ análisis automático
     def _analysis_done(self, res, report_path: str):
         from app.auto_analysis import spoken_summary
@@ -473,6 +501,7 @@ class LiveEngineer:
 
     def _check_connection(self):
         if self.connected and not (self.ir.is_initialized and self.ir.is_connected):
+            self._we_record = False
             self.ir.shutdown()
             self.reset_session()
             print("iRacing desconectado.", flush=True)
@@ -545,6 +574,7 @@ class LiveEngineer:
         self._last_t = t
         self._tick_n += 1
         self.on_track = bool(ir["IsOnTrack"])
+        self._auto_recording()
         if self._reload_track_data:
             # El análisis automático actualizó referencias y límites: recargarlos
             self._reload_track_data = False
@@ -1838,6 +1868,8 @@ def main():
                         help="Aprieta el botón del volante que quieres usar para hablarle al ingeniero")
     parser.add_argument("--tecla", default=None, help="Tecla push-to-talk alternativa (por defecto Insert)")
     parser.add_argument("--sin-ptt", action="store_true", help="Desactivar las preguntas por voz")
+    parser.add_argument("--sin-grabar", action="store_true",
+                        help="No iniciar la grabación de telemetría automáticamente (usar Alt+L)")
     args = parser.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1867,7 +1899,8 @@ def main():
     voice = cfg.get("voice") or DEFAULT_NEURAL_VOICE
 
     eng = LiveEngineer(driver_name=args.nombre, speak=not args.sin_voz,
-                       neural_voice=None if args.voz_windows else voice, log_path=log_path)
+                       neural_voice=None if args.voz_windows else voice, log_path=log_path,
+                       auto_record=not args.sin_grabar)
     if not args.sin_ptt:
         ptt = PushToTalk(on_text=eng.ask, on_error=lambda m: eng.emit(m, P_BATTLE + 5, ttl=6), config=cfg)
         ptt.start()

@@ -55,6 +55,8 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - Attack/defend calls with gap trend ("you catch him in 3 laps"), and where a rival is faster than you
 - Tire/slide warnings, ABS overuse, in-car adjustments (brake bias, TC), fuel to the finish, laps remaining
 - Setup report every time you return to the pits (saved to `logs/`)
+- Starts disk telemetry recording when you get in the car and closes it when you get out (no `Alt+L`;
+  disable with `--sin-grabar`); each finished session is analyzed automatically and summarized by voice
 - Reads telemetry at iRacing's native 60 Hz (waits on the SDK data-ready event, no polling delay)
 - **Ask by voice** (push-to-talk on a wheel button or the Insert key): damage, fuel, pit strategy, tires,
   track limits, gaps to the car ahead/behind, laps left, lap times, where you lose time, engine temps,
