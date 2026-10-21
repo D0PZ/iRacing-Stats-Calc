@@ -63,6 +63,11 @@ class CornerResult:
     offtracks: int = 0               # salidas de pista en esta curva (todas las vueltas)
     gear: int = 0
     kind: str = ""                   # lenta / media / rápida
+    brake_at_m: Optional[float] = None       # metro de pista donde frenas en tu mejor paso
+    brake_peak_best: float = 0.0             # presión máxima de freno (0-100%) en tu mejor paso
+    brake_peak_avg: float = 0.0
+    throttle_m_best: Optional[float] = None  # metros después del vértice hasta ir a fondo (mejor paso)
+    throttle_m_avg: Optional[float] = None
 
 
 @dataclass
@@ -302,7 +307,7 @@ class TelemetryAnalyzer:
             idx = np.arange(s, e) % n
             apex_rel = apex - s
             cr = CornerResult(number=k + 1, apex_m=float(grid[apex]))
-            times, mins, exits, brakes = {}, {}, {}, {}
+            times, mins, exits, brakes, peaks, fulls = {}, {}, {}, {}, {}, {}
             under, over, spin, lock, absr, coast, gears = [], [], [], [], [], [], []
             for num, d in data.items():
                 t = d["t"][idx]
@@ -317,6 +322,13 @@ class TelemetryAnalyzer:
                 hit = np.flatnonzero(br > 0.1)
                 if len(hit):
                     brakes[num] = (apex_rel - hit[0]) * step  # metros antes del vértice
+                    peaks[num] = float(br.max()) * 100
+                # Vuelta al acelerador a fondo después del vértice (sostenido 20 m)
+                thr_after = d["Throttle"][idx[apex_rel:]]
+                hold = max(int(20 / step), 1)
+                full = np.flatnonzero(np.convolve(thr_after > 0.95, np.ones(hold), "valid") >= hold)
+                if len(full):
+                    fulls[num] = full[0] * step
                 gears.append(d["Gear"][apex])
                 # Balance: subviraje con carga lateral alta
                 st, yr, lat = d["SteeringWheelAngle"][idx], d["YawRate"][idx], d["LatAccel"][idx]
@@ -352,6 +364,12 @@ class TelemetryAnalyzer:
             cr.exit_speed_avg = float(np.mean(list(exits.values())))
             cr.brake_m_best = brakes.get(best_num)
             cr.brake_m_avg = float(np.mean(list(brakes.values()))) if brakes else None
+            if cr.brake_m_best is not None:
+                cr.brake_at_m = float((grid[apex] - cr.brake_m_best) % res.track_len)
+            cr.brake_peak_best = peaks.get(best_num, 0.0)
+            cr.brake_peak_avg = float(np.mean(list(peaks.values()))) if peaks else 0.0
+            cr.throttle_m_best = fulls.get(best_num)
+            cr.throttle_m_avg = float(np.mean(list(fulls.values()))) if fulls else None
             cr.understeer_deg = float(np.median(under)) if under else 0.0
             cr.understeer = 1.0
             cr.offtracks = int(sum(np.sum(np.diff((d["PlayerTrackSurface"][idx] < 0.5).astype(int)) == 1)
@@ -530,6 +548,13 @@ class TelemetryAnalyzer:
             if c.exit_speed_best - c.exit_speed_avg > 2:
                 reasons.append(f"sales {c.exit_speed_best - c.exit_speed_avg:.0f} km/h más lento: acelera antes "
                                f"y más decidido")
+            if c.throttle_m_best is not None and c.throttle_m_avg is not None and \
+                    c.throttle_m_avg - c.throttle_m_best > 10:
+                reasons.append(f"vuelves a fondo {c.throttle_m_avg - c.throttle_m_best:.0f} m más tarde que en tu mejor "
+                               f"paso ({c.throttle_m_best:.0f} m después del vértice)")
+            if c.brake_peak_best - c.brake_peak_avg > 8:
+                reasons.append(f"frenas más suave: pico de {c.brake_peak_avg:.0f}% contra {c.brake_peak_best:.0f}% "
+                               f"en tu mejor paso, ataca más fuerte el pedal al inicio")
             if c.coast_s > 0.4:
                 reasons.append(f"pasas {c.coast_s:.1f} s sin freno ni acelerador (inercia)")
             detail = "; ".join(reasons) if reasons else "inconsistencia general en la línea"
@@ -745,6 +770,20 @@ def format_report(res: AnalysisResult) -> str:
                          f"{c.min_speed_best:5.0f}/{c.min_speed_avg:<5.0f}     {c.exit_speed_best:5.0f}/{c.exit_speed_avg:<5.0f}"
                          f"      {bm:>9}  {c.time_loss_avg:6.2f}s  {c.understeer_deg:+5.1f}°  {c.wheelspin:5.0f}%  "
                          f"{c.lockups:6.0f}%  {c.abs_pct:3.0f}%  {c.offtracks:4d}")
+        lines.append("")
+    if res.corners:
+        lines.append("REFERENCIAS DE TU MEJOR PASO POR CADA CURVA")
+        for c in res.corners:
+            parts = [f"  C{c.number:<2} (V{c.best_time_lap})"]
+            if c.brake_at_m is not None:
+                parts.append(f"frena en el metro {c.brake_at_m:5.0f} ({c.brake_m_best:.0f} m antes del vértice, "
+                             f"pico {c.brake_peak_best:.0f}%)")
+            else:
+                parts.append("sin frenar")
+            parts.append(f"vértice a {c.min_speed_best:.0f} km/h en {c.gear}ª")
+            if c.throttle_m_best is not None:
+                parts.append(f"a fondo {c.throttle_m_best:.0f} m después")
+            lines.append(" · ".join(parts))
         lines.append("")
     if res.limit_zones:
         lines.append("LÍMITES DE PISTA (margen al límite por vuelta; negativo = te pasaste)")

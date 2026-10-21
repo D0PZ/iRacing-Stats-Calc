@@ -43,8 +43,12 @@ def test_analyzer_laps_corners_fuel(ibt_path, monkeypatch, tmp_path):
     lap3 = next(l for l in res.laps if l.number == 3)
     assert lap3.offtrack
     assert sum(c.offtracks for c in res.corners) >= 1
+    for c in res.corners:                                  # referencias de frenada y acelerador
+        assert c.brake_at_m is not None and 0 <= c.brake_at_m < 2000
+        assert c.brake_peak_best == pytest.approx(80, abs=1)   # el sintético frena al 80%
+        assert c.throttle_m_best is not None
     text = format_report(res)
-    assert "VUELTAS" in text and "RECOMENDACIONES" in text
+    assert "VUELTAS" in text and "RECOMENDACIONES" in text and "REFERENCIAS" in text
 
 
 def test_track_limit_margin_with_known_offset():

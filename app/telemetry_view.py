@@ -227,7 +227,8 @@ class TelemetryView:
         c = self.c
         f = self._frame(body, "Curva por curva")
         headers = ["Curva", "Metro", "Tipo", "Marcha", "V. mín mejor/prom", "Salida mejor/prom",
-                   "Frenada (m antes)", "Pérdida", "Subviraje", "Patina", "Bloqueo", "ABS", "Salidas"]
+                   "Frenada (m antes)", "Frena en (mejor)", "A fondo (m después)", "Pérdida", "Subviraje",
+                   "Patina", "Bloqueo", "ABS", "Salidas"]
         for j, h in enumerate(headers):
             tk.Label(f, text=h, bg=c['bg_card'], fg=c['text_muted'], font=('Segoe UI', 8, 'bold')).grid(
                 row=0, column=j, padx=4, pady=2, sticky=tk.W)
@@ -243,6 +244,9 @@ class TelemetryView:
                 (f"{cr.min_speed_best:.0f}/{cr.min_speed_avg:.0f}", c['text_primary']),
                 (f"{cr.exit_speed_best:.0f}/{cr.exit_speed_avg:.0f}", c['text_primary']),
                 (brake, c['text_primary']),
+                (f"metro {cr.brake_at_m:.0f}" if cr.brake_at_m is not None else "-", c['accent_cyan']),
+                (f"{cr.throttle_m_best:.0f}/{cr.throttle_m_avg:.0f}"
+                 if cr.throttle_m_best is not None and cr.throttle_m_avg is not None else "-", c['text_primary']),
                 (f"{cr.time_loss_avg:.2f}s", c['accent_red'] if cr.time_loss_avg == worst else c['text_primary']),
                 (f"{cr.understeer_deg:+.1f}°", under_col),
                 (f"{cr.wheelspin:.0f}%", c['accent_orange'] if cr.wheelspin > 12 else c['text_primary']),
