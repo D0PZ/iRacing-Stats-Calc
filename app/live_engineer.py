@@ -11,6 +11,7 @@ import queue
 import re
 import threading
 import time
+import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -20,6 +21,8 @@ try:
     IRSDK_AVAILABLE = True
 except ImportError:
     IRSDK_AVAILABLE = False
+
+from app.track_limits import load_tracker, save_tracker
 
 
 # Prioridades de mensajes (mayor = más urgente)
@@ -31,7 +34,9 @@ P_INFO = 20
 
 N_SEGMENTS = 20          # Minisectores por vuelta para comparar con rivales
 PROFILE_BINS = 200       # Resolución del perfil de velocidad para detectar curvas
-TICK_HZ = 20
+TICK_HZ = 60            # iRacing publica telemetría a 60 Hz; esperamos su evento de "dato nuevo"
+SLOW_EVERY = 6          # tareas pesadas a 10 Hz
+WHEELBASE = 2.46        # m (GT/Cup típico; solo escala el ángulo de subviraje)
 
 
 @dataclass(order=True)
@@ -164,7 +169,10 @@ class Voice:
             if time.time() > msg.expires:
                 continue  # Mensaje viejo, ya no sirve
             if self.neural is not None:
-                path = self.neural.synth(msg.text)
+                cached = os.path.exists(self.neural.file_for(msg.text))
+                # Una urgencia no espera 1.5 s a la voz neuronal: si no está en caché, voz de Windows ya
+                urgent_uncached = msg.priority >= P_SAFETY and not cached and speaker is not None
+                path = None if urgent_uncached else self.neural.synth(msg.text)
                 if path and time.time() <= msg.expires:
                     try:
                         self.neural.play(path)
@@ -211,6 +219,9 @@ class LiveEngineer:
         self.log_file = open(log_path, "a", encoding="utf-8") if log_path else None
         self.ir = irsdk.IRSDK() if IRSDK_AVAILABLE else None
         self._stop = threading.Event()
+        self.questions: "queue.Queue[str]" = queue.Queue()
+        self.muted_until = 0.0
+        self.last_spoken = ""
         self.reset_session()
 
     # ------------------------------------------------------------------ util
@@ -239,7 +250,8 @@ class LiveEngineer:
         self.slide_timer = 0.0
         self.under_timer = 0.0
         self.spin_timer = 0.0
-        self.yaw_ratio_ref = deque(maxlen=600)
+        self.yaw_ratio_ref = deque(maxlen=1200)
+        self._steer_ratio = None
         # Mapa de la pista aprendido de tu velocidad (para nombrar curvas)
         self.speed_profile: List[Optional[float]] = [None] * PROFILE_BINS
         self.corners: List[float] = []
@@ -254,6 +266,21 @@ class LiveEngineer:
         self.session_handling: Dict[str, List[float]] = defaultdict(list)
         self.laps_since_setup = 0
         self.prev_in_stall = False
+        # Tiempo real
+        self.dt = 1.0 / TICK_HZ
+        self._last_t = None
+        self._tick_n = 0
+        # Límites de pista
+        self.track_name = ""
+        self.limits = None
+        self.limits_dirty = False
+        self.zone_state: Dict[int, dict] = {}
+        self._cur_zone = None
+        self._prev_offtrack = False
+        self._last_off_t = 0.0
+        self._rumble_side = 0
+        self._rumble_t = -99.0
+        self.stint_start_lap = 0
 
     @staticmethod
     def _new_lap_stats():
@@ -280,7 +307,17 @@ class LiveEngineer:
                 self.on_message(text, priority)
             except Exception:
                 pass
+        if now < self.muted_until and priority < P_FLAG:
+            return  # modo silencio: solo peligros, banderas y respuestas
+        self.last_spoken = text
         self.voice.say(text, priority, ttl)
+
+    def ask(self, text: str):
+        """Pregunta del piloto (desde el push-to-talk); se responde en el hilo de telemetría"""
+        print(f"[pregunta] {text}", flush=True)
+        if self.log_file:
+            self.log_file.write(f"[{time.strftime('%H:%M:%S')}] [pregunta] {text}\n")
+        self.questions.put(text)
 
     def car_label(self, idx: int) -> str:
         d = self.drivers.get(idx)
@@ -377,12 +414,20 @@ class LiveEngineer:
             try:
                 self._check_connection()
                 if self.connected:
+                    # Bloquea hasta que iRacing publica la muestra nueva (cada 16 ms): latencia mínima
                     self.ir.freeze_var_buffer_latest()
                     self._tick()
                     self.ir.unfreeze_var_buffer_latest()
+                else:
+                    while not self.questions.empty():
+                        self.questions.get()
+                        self.emit("Todavía no estoy conectado a iRacing.", P_BATTLE + 5, ttl=10)
+                    time.sleep(1.0)
             except Exception as e:
                 print(f"[error] {e}", flush=True)
-            time.sleep(1.0 / TICK_HZ)
+                time.sleep(0.05)
+        if self.limits is not None and self.limits_dirty:
+            save_tracker(self.track_name, self.limits)
         self.voice.stop()
 
     def stop(self):
@@ -394,6 +439,7 @@ class LiveEngineer:
             self.reset_session()
             print("iRacing desconectado.", flush=True)
         elif not self.connected and self.ir.startup() and self.ir.is_initialized and self.ir.is_connected:
+            self._last_t = None
             self.connected = True
             self.emit(f"Radio conectada. Listo cuando quieras, {self.name}.", P_INFO)
 
@@ -406,6 +452,16 @@ class LiveEngineer:
             tl = str(self.ir["WeekendInfo"]["TrackLength"])  # "3.70 km"
             value, unit = tl.split()[:2]
             self.track_len = float(value) * (1609.34 if unit.startswith("mi") else 1000.0)
+        except Exception:
+            pass
+        try:
+            name = str(self.ir["WeekendInfo"]["TrackDisplayName"])
+            if name and name != self.track_name:
+                self.track_name = name
+                self.limits = load_tracker(name, self.track_len)
+                self.zone_state = {}
+                if self.limits.zones:
+                    print(f"[límites] {len(self.limits.zones)} zonas de límite conocidas en {name}", flush=True)
         except Exception:
             pass
         info = self.ir["DriverInfo"] or {}
@@ -431,6 +487,18 @@ class LiveEngineer:
         if self.me < 0:
             return
         t = ir["SessionTime"] or 0.0
+        if self._last_t is not None and 0 < t - self._last_t < 0.25:
+            self.dt = t - self._last_t
+        self._last_t = t
+        self._tick_n += 1
+        while not self.questions.empty():
+            q = self.questions.get()
+            try:
+                answer = self._answer(q)
+            except Exception as e:
+                answer = "No tengo ese dato ahora."
+                print(f"[pregunta] error: {e}", flush=True)
+            self.emit(answer, P_BATTLE + 5, ttl=20)
 
         num = ir["SessionNum"]
         if num != self.session_num:
@@ -457,8 +525,10 @@ class LiveEngineer:
             return
         self._check_hazards()
         self._driver_dynamics()
+        self._track_limits_live()
         self._rival_events()
-        self._check_traffic()
+        if self._tick_n % SLOW_EVERY == 0:
+            self._check_traffic()
         self._check_lap_complete()
         self._check_incidents_and_warnings()
 
@@ -656,8 +726,8 @@ class LiveEngineer:
             self.emit("Última vuelta. Dalo todo.", P_FLAG, key="white", cooldown=60)
         if new & F.checkered:
             self.emit(f"Bandera a cuadros. Buen trabajo, {self.name}.", P_FLAG, key="checkered", cooldown=120)
-        if flags & (F.yellow | F.yellow_waving | F.caution | F.caution_waving):
-            self.lap_stats["yellow"] = True
+        if flags & (F.caution | F.caution_waving):
+            self.lap_stats["yellow"] = True  # full course yellow: la vuelta no sirve para comparar ritmo
         self.prev_flags = flags
 
         state = ir["SessionState"] or 0
@@ -675,7 +745,7 @@ class LiveEngineer:
     # ---------------------------------------------------- driver dynamics
     def _driver_dynamics(self):
         ir = self.ir
-        dt = 1.0 / TICK_HZ
+        dt = self.dt
         v = ir["Speed"] or 0.0
         steer = ir["SteeringWheelAngle"] or 0.0
         yaw = ir["YawRate"] or 0.0
@@ -686,6 +756,7 @@ class LiveEngineer:
 
         if ir["OnPitRoad"]:
             st["pit"] = True
+            self.stint_start_lap = len(self.my_laps) + 1
         surf = ir["PlayerTrackSurface"]
         if surf == 0:
             st["offtrack"] = True
@@ -718,15 +789,17 @@ class LiveEngineer:
         else:
             self.slide_timer = 0.0
 
-        # Subviraje: el auto gira mucho menos de lo que pide el volante
-        if abs(steer) > 0.05 and lat < 0.6 and steer * yaw * sign > 0:
-            self.yaw_ratio_ref.append(abs(yaw) / (v * abs(steer)))
-        if len(self.yaw_ratio_ref) > 100 and abs(steer) > 0.15 and lat > 0.9:
-            ref = sorted(self.yaw_ratio_ref)[len(self.yaw_ratio_ref) // 2]
-            ratio = abs(yaw) / (v * abs(steer)) / ref if ref > 0 else 1.0
-            if ratio < 0.65:
+        # Subviraje: ángulo de las ruedas delanteras menos el ángulo que el auto realmente gira
+        # (Ackermann L·yaw/v). La relación de dirección se aprende en giros suaves a baja carga.
+        if 10 < v < 35 and abs(steer) > 0.1 and lat < 0.35 and steer * yaw * sign > 0 and abs(yaw) > 0.02:
+            self.yaw_ratio_ref.append(abs(steer) / (WHEELBASE * abs(yaw) / v))
+            if len(self.yaw_ratio_ref) % 60 == 0:
+                self._steer_ratio = sorted(self.yaw_ratio_ref)[len(self.yaw_ratio_ref) // 2]
+        if self._steer_ratio and abs(steer) > 0.03 and lat > 0.9 and steer * yaw * sign > 0:
+            under_deg = math.degrees(abs(steer) / self._steer_ratio - WHEELBASE * abs(yaw) / v)
+            if under_deg > 3.0:  # en el límite normal hay 1-2°; más de 3° es irse de frente
                 self.under_timer += dt
-                if self.under_timer >= 0.4 and self.under_timer - dt < 0.4:
+                if self.under_timer >= 0.5 and self.under_timer - dt < 0.5:
                     st["understeer"] += 1
                     (st["entry_under"] if brk > 0.1 else st["mid_under"]).append(pct)
             else:
@@ -738,7 +811,7 @@ class LiveEngineer:
         if all(w is not None for w in wheels):
             front = (wheels[0] + wheels[1]) / 2
             if thr > 0.3 and front > 8 and (wheels[2] + wheels[3]) / 2 > front * 1.08:
-                st["wheelspin"] += 1
+                st["wheelspin"] += dt
                 st["spin_pcts"].append(pct)
         elif gear > 0 and v > 15:
             r = rpm / v
@@ -748,7 +821,7 @@ class LiveEngineer:
             elif thr > 0.6 and len(hist) > 60:
                 base = sorted(hist)[len(hist) // 2]
                 if r > base * 1.12:
-                    st["wheelspin"] += 1
+                    st["wheelspin"] += dt
                     st["spin_pcts"].append(pct)
 
         # Uso del ABS
@@ -779,7 +852,11 @@ class LiveEngineer:
         fuel = ir["FuelLevel"] or 0.0
         st = self.lap_stats
         used = (self.fuel_at_lap_start - fuel) if self.fuel_at_lap_start is not None else 0
-        clean = not (st["yellow"] or st["offtrack"] or st["pit"]) and lap_time > 0
+        # Una salida leve (1x) sigue siendo vuelta de ritmo, igual que en el análisis de .ibt
+        clean = not (st["yellow"] or st["pit"]) and lap_time > 0
+        best_prev = min((l["time"] for l in self.my_laps if l["time"] > 0), default=None)
+        if clean and best_prev and lap_time > best_prev * 1.04:
+            clean = False
         self.my_laps.append({"time": lap_time if clean else -1, "raw": lap_time,
                              "fuel": used if used > 0 and not st["pit"] else None, **st})
         self.fuel_at_lap_start = fuel
@@ -824,7 +901,7 @@ class LiveEngineer:
             self.emit(f"Subviras entrando {self._most_common_zone(st['entry_under'])}. Suelta el freno "
                       f"más progresivo, o balance de frenos un clic atrás.{now}", P_CAR,
                       key="bias_rear", cooldown=150, ttl=15)
-        if len(st["exit_slides"]) >= 2 or st["wheelspin"] >= 30:
+        if len(st["exit_slides"]) >= 2 or st["wheelspin"] >= 1.5:  # segundos patinando por vuelta
             zone = self._most_common_zone(st["exit_slides"] or st["spin_pcts"]) or "en las salidas"
             if tc is not None:
                 self.emit(f"Pierdes tracción al acelerar {zone}. Sube el control de tracción un clic, "
@@ -1034,7 +1111,8 @@ class LiveEngineer:
         ir = self.ir
         inc = ir["PlayerCarMyIncidentCount"]
         if inc is not None:
-            if self.prev_incidents is not None and inc > self.prev_incidents:
+            if self.prev_incidents is not None and inc > self.prev_incidents \
+                    and time.time() - self._last_off_t > 4:
                 self.emit(f"Incidente de {inc - self.prev_incidents}x, llevas {inc}. Calma.",
                           P_CAR, key="inc", cooldown=5, ttl=6)
             self.prev_incidents = inc
@@ -1056,6 +1134,328 @@ class LiveEngineer:
             self.emit("Motor apagado, arranca.", P_SAFETY, key="stall", cooldown=10)
         self.prev_warnings = warn
 
+
+    # ------------------------------------------------- límites de pista (vivo)
+    def _zone_key(self, z: dict) -> int:
+        return int(round(z["s"] / 10))
+
+    def _zone_name(self, z: dict) -> str:
+        return self.corner_at((z["s"] % self.track_len) / self.track_len)
+
+    def _track_limits_live(self):
+        """
+        Zonas de límite aprendidas de tus .ibt (con GPS) y de cada salida en vivo.
+        En vivo no hay posición lateral fiable, así que se usan: aviso previo, salida real
+        (PlayerTrackSurface) y velocidad de salida.
+        """
+        if self.limits is None:
+            return
+        ir = self.ir
+        s = ir["LapDist"]
+        v = ir["Speed"] or 0.0
+        if s is None or s < 0 or ir["OnPitRoad"]:
+            return
+        now = time.time()
+        L = self.track_len
+        rumble_l = (ir["TireLF_RumblePitch"] or 0) > 0 or (ir["TireLR_RumblePitch"] or 0) > 0
+        rumble_r = (ir["TireRF_RumblePitch"] or 0) > 0 or (ir["TireRR_RumblePitch"] or 0) > 0
+        if rumble_l or rumble_r:
+            self._rumble_side, self._rumble_t = (1 if rumble_l else -1), now
+
+        def rel(z):
+            return (s - z["s"] + L / 2) % L - L / 2
+
+        # Aviso antes de llegar a una zona donde te pasas seguido
+        for z in self.limits.zones:
+            d = rel(z)
+            st = self.zone_state.setdefault(self._zone_key(z), {"offs": 0, "passes": 0, "best_exit": 0.0,
+                                                                "curb": 0})
+            total = z.get("offs", 0)
+            if -260 < d < -180 and v > 20 and (st["offs"] >= 1 or total >= 2):
+                self.emit(f"Ojo límite {self._zone_name(z)}.", P_CAR, key=f"limw{self._zone_key(z)}",
+                          cooldown=self.ref_lap() * 2.5, ttl=3)
+
+        # Entrada / salida de la zona activa
+        zone = next((z for z in self.limits.zones if -60 <= rel(z) <= 60), None)
+        if zone is not None and self._cur_zone is None:
+            self._cur_zone = {"z": zone, "off": False, "curb": False}
+        if self._cur_zone is not None:
+            cz = self._cur_zone
+            if (rumble_l and cz["z"]["side"] > 0) or (rumble_r and cz["z"]["side"] < 0):
+                cz["curb"] = True
+            if zone is not cz["z"]:
+                st = self.zone_state.setdefault(self._zone_key(cz["z"]), {"offs": 0, "passes": 0,
+                                                                         "best_exit": 0.0, "curb": 0})
+                st["passes"] += 1
+                st["curb"] += int(cz["curb"])
+                exit_kmh = v * 3.6
+                if not cz["off"]:
+                    if st["passes"] >= 3 and exit_kmh > st["best_exit"] + 0.5 and cz["curb"]:
+                        self.emit(f"Salida perfecta {self._zone_name(cz['z'])}, usaste el piano sin pasarte.",
+                                  P_INFO, key=f"limok{self._zone_key(cz['z'])}", cooldown=self.ref_lap() * 3, ttl=6)
+                    st["best_exit"] = max(st["best_exit"], exit_kmh)
+                self._cur_zone = None
+
+        # Salida de pista real (iRacing marca fuera cuando pasas el límite)
+        off = ir["PlayerTrackSurface"] == 0
+        if off and not self._prev_offtrack and v > 12:
+            self._last_off_t = now
+            z = next((z for z in self.limits.zones if abs(rel(z)) < 60), None)
+            vx, vy = ir["VelocityX"] or 0.0, ir["VelocityY"] or 0.0
+            stable = abs(math.atan2(vy, max(abs(vx), 0.1))) < 0.12
+            if z is None and stable:
+                side = self._rumble_side if now - self._rumble_t < 1.0 else 0
+                z = {"s": float(s), "side": side or 1, "limits": [], "s_hist": [float(s)], "offs": 0, "samples": []}
+                self.limits.zones.append(z)
+            if z is not None:
+                z["offs"] = z.get("offs", 0) + 1
+                self.limits_dirty = True
+                st = self.zone_state.setdefault(self._zone_key(z), {"offs": 0, "passes": 0, "best_exit": 0.0,
+                                                                    "curb": 0})
+                st["offs"] += 1
+                if self._cur_zone is not None:
+                    self._cur_zone["off"] = True
+                n = st["offs"]
+                extra = f" Van {n} ahí esta sesión, deja un poco de margen." if n >= 2 else ""
+                self.emit(f"Te pasaste del límite {self._zone_name(z)}.{extra}", P_CAR,
+                          key="limoff", cooldown=6, ttl=5)
+        self._prev_offtrack = off
+
+    # ---------------------------------------------------------- preguntas
+    @staticmethod
+    def _norm(text: str) -> str:
+        t = unicodedata.normalize("NFD", text.lower())
+        return "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+
+    def _fuel_numbers(self):
+        ir = self.ir
+        fuel = ir["FuelLevel"] or 0.0
+        used = [l["fuel"] for l in self.my_laps[-5:] if l.get("fuel")]
+        per_lap = sum(used) / len(used) if used else None
+        left = self.laps_left()
+        return fuel, per_lap, left
+
+    def _answer(self, question: str) -> str:
+        ir = self.ir
+        n = self._norm(question)
+
+        def has(*words):
+            return any(w in n for w in words)
+
+        if has("repite", "repeti", "que dijiste", "no te escuche"):
+            return self.last_spoken or "Todavía no te he dicho nada."
+        if has("silencio", "callate", "calla", "no me hables"):
+            self.muted_until = time.time() + 300
+            return "Entendido, silencio cinco minutos. Solo te aviso de peligros y banderas."
+        if has("habla", "vuelve", "activa la radio", "quita el silencio"):
+            self.muted_until = 0
+            return "Radio activa de nuevo."
+
+        if has("dano", "reparacion", "roto", "golpe", "averia"):
+            rep_t = ir["PitRepairLeft"] or 0.0
+            opt_t = ir["PitOptRepairLeft"] or 0.0
+            parts = []
+            if rep_t > 0:
+                parts.append(f"tienes reparación obligatoria de {rep_t:.0f} segundos")
+            if opt_t > 0:
+                parts.append(f"reparación opcional de {opt_t:.0f} segundos")
+            warn = int(ir["EngineWarnings"] or 0)
+            W = irsdk.EngineWarnings
+            if warn & W.water_temp_warning:
+                parts.append("temperatura de agua alta")
+            if warn & W.oil_pressure_warning:
+                parts.append("presión de aceite baja")
+            if not parts:
+                return "Sin daño registrado. El auto está entero."
+            return "Daño: " + ", ".join(parts) + ". " + (
+                "La obligatoria hay que hacerla en pits." if rep_t > 0 else "Puedes seguir, la opcional es para recuperar rendimiento.")
+
+        if has("combustible", "gasolina", "bencina", "nafta", "fuel", "litros"):
+            fuel, per_lap, left = self._fuel_numbers()
+            if not per_lap:
+                return f"Tienes {fuel:.1f} litros. Necesito una vuelta completa para calcular el consumo."
+            laps_fuel = fuel / per_lap
+            msg = f"Tienes {fuel:.1f} litros, gastas {per_lap:.2f} por vuelta: te alcanza para {laps_fuel:.1f} vueltas."
+            if left is not None:
+                diff = fuel - (left + 0.2) * per_lap
+                msg += (f" Faltan {left}. Te sobran {diff:.1f} litros." if diff >= 0
+                        else f" Faltan {left}. Te faltan {-diff:.1f} litros, tienes que parar o ahorrar.")
+            return msg
+
+        if has("pits", "parar", "box", "estrategia", "entrar"):
+            fuel, per_lap, left = self._fuel_numbers()
+            rep_t = ir["PitRepairLeft"] or 0.0
+            parts = []
+            if per_lap and left is not None:
+                need = (left + 0.3) * per_lap - fuel
+                parts.append(f"carga {need + 0.5:.1f} litros para terminar" if need > 0
+                             else "no necesitas combustible")
+            if rep_t > 0:
+                parts.append(f"hay {rep_t:.0f} segundos de reparación obligatoria")
+            if not parts:
+                return "Todavía no tengo datos de consumo para la estrategia."
+            return "Para pits: " + ", ".join(parts) + "."
+
+        if has("limite", "piano", "me sali", "track limit"):
+            if not self.limits or not self.limits.zones:
+                return "No conozco zonas de límite en esta pista todavía."
+            hot = []
+            for z in self.limits.zones:
+                st = self.zone_state.get(self._zone_key(z), {})
+                if st.get("offs"):
+                    hot.append(f"{st['offs']} {self._zone_name(z)}")
+            if hot:
+                return "Esta sesión te pasaste: " + ", ".join(hot) + ". Deja medio metro de margen ahí."
+            names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
+            return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
+
+        if has("neumatico", "goma", "cubierta", "llanta", "rueda", "presion"):
+            parts = []
+            temps = {c: [ir[f"{c}temp{x}"] for x in ("L", "M", "R")] for c in ("LF", "RF", "LR", "RR")}
+            if all(v is not None for t in temps.values() for v in t):
+                avg = {c: sum(t) / 3 for c, t in temps.items()}
+                parts.append(f"temperaturas: delanteras {avg['LF']:.0f} y {avg['RF']:.0f}, "
+                             f"traseras {avg['LR']:.0f} y {avg['RR']:.0f} grados")
+            press = [ir[f"{c}pressure"] for c in ("LF", "RF", "LR", "RR")]
+            if all(p is not None for p in press) and has("presion"):
+                parts.append("presiones " + ", ".join(f"{p:.0f}" for p in press) + " kilopascales")
+            stint = len(self.my_laps) - self.stint_start_lap + 1
+            if stint > 0:
+                parts.append(f"llevan {stint} vueltas")
+            recent = [l for l in self.my_laps[-3:]]
+            slides = sum(l.get("slides", 0) for l in recent)
+            spin = sum(l.get("wheelspin", 0) for l in recent)
+            if recent:
+                parts.append(f"en las últimas vueltas {slides} derrapes y {spin:.1f} segundos patinando"
+                             + (", cuídalas en las salidas" if slides > 6 or spin > 4 else ", van bien"))
+            return ("Neumáticos: " + "; ".join(parts) + ".") if parts else "Todavía no tengo datos de neumáticos."
+
+        if has("incidente"):
+            inc = ir["PlayerCarMyIncidentCount"] or 0
+            limit = None
+            try:
+                limit = ir["WeekendInfo"]["WeekendOptions"]["IncidentLimit"]
+            except Exception:
+                pass
+            return f"Llevas {inc} incidentes" + (f" de un límite de {limit}." if limit and str(limit).isdigit() else ".")
+
+        if has("motor", "agua", "aceite"):
+            w, o, op = ir["WaterTemp"], ir["OilTemp"], ir["OilPress"]
+            return (f"Motor: agua {w:.0f} grados, aceite {o:.0f} grados"
+                    + (f", presión de aceite {op:.1f} bar." if op is not None else ".")) if w is not None else                 "No tengo datos del motor."
+
+        if has("clima", "lluvia", "mojad", "temperatura de pista", "pista"):
+            tt, at = ir["TrackTempCrew"], ir["AirTemp"]
+            wet = ir["TrackWetness"]
+            msg = f"Pista a {tt:.0f} grados, aire a {at:.0f}." if tt is not None and at is not None else ""
+            if wet is not None and wet > 1:
+                msg += " La pista tiene humedad."
+            return msg or "No tengo datos del clima."
+
+        if has("freno", "balance", "traccion", "tc", "abs"):
+            bias, tc, abs_ = ir["dcBrakeBias"], ir["dcTractionControl"], ir["dcABS"]
+            parts = []
+            if bias is not None:
+                parts.append(f"balance de frenos {bias:.1f}")
+            if tc is not None:
+                parts.append(f"control de tracción {tc:.0f}")
+            if abs_ is not None:
+                parts.append(f"ABS {abs_:.0f}")
+            return ("Tienes " + ", ".join(parts) + ".") if parts else "No tengo los ajustes del auto."
+
+        my_pos, ahead, behind = self._class_neighbors()
+        if has("adelante", "delante", "el de enfrente", "puntero"):
+            if ahead is None:
+                return "No tienes a nadie adelante, vas primero."
+            return self._rival_answer(ahead, "adelante")
+        if has("atras", "detras"):
+            if behind is None:
+                return "No tienes a nadie atrás."
+            return self._rival_answer(behind, "atrás")
+
+        if has("falta", "quedan", "queda", "cuantas vueltas"):
+            left = self.laps_left()
+            remain = ir["SessionTimeRemain"]
+            if left is not None:
+                return f"Quedan {left} vueltas" + (f", unos {remain / 60:.0f} minutos." if remain and 0 < remain < 86400 else ".")
+            return "No sé cuánto falta."
+
+        if has("pierdo", "perdiendo", "mejorar", "lento", "ideal"):
+            if not self.seg_loss_hist:
+                return "Necesito un par de vueltas limpias para decirte dónde pierdes."
+            worst = max(self.seg_loss_hist, key=lambda k: sum(self.seg_loss_hist[k]) / max(len(self.seg_loss_hist[k]), 1))
+            loss = sum(self.seg_loss_hist[worst]) / max(len(self.seg_loss_hist[worst]), 1)
+            msg = f"Donde más pierdes es {self.zone_name(worst)}, unas {self.fmt_gap(loss)} por vuelta contra tu mejor."
+            if len(self.my_best_segs) == N_SEGMENTS:
+                msg += f" Tu vuelta ideal es {self.fmt_lap(sum(self.my_best_segs.values()))}."
+            return msg
+
+        if has("vuelta", "tiempo", "record"):
+            last = ir["LapLastLapTime"]
+            mine = [l["raw"] for l in self.my_laps if l.get("raw", 0) > 0] + \
+                [x for x in [ir["LapBestLapTime"]] if x and x > 0]
+            best = min(mine) if mine else None
+            if not last or last <= 0:
+                return "Todavía no tienes vueltas completas."
+            msg = f"Última vuelta {self.fmt_lap(last)}"
+            if best and best > 0:
+                msg += f", mejor {self.fmt_lap(best)}, a {self.fmt_gap(last - best)} de tu mejor." if last > best + 0.001 \
+                    else ", y es tu mejor vuelta."
+            return msg
+
+        if has("setup", "auto", "subvir", "sobrevir", "comportamiento"):
+            h = self.session_handling
+            laps = max(self.laps_since_setup, 1)
+            counts = {k: len(h[k]) / laps for k in ("entry_slides", "exit_slides", "entry_under", "mid_under")}
+            top = max(counts, key=counts.get)
+            if counts[top] < 0.5:
+                return "El auto se ve equilibrado, sin tendencias marcadas."
+            names = {"entry_slides": "sobreviraje al frenar", "exit_slides": "sobreviraje al acelerar",
+                     "entry_under": "subviraje en la entrada", "mid_under": "subviraje en el medio de curva"}
+            return f"Lo que más se repite es {names[top]}, {counts[top]:.1f} veces por vuelta, sobre todo {self._most_common_zone(h[top])}."
+
+        if has("posicion", "lugar", "puesto", "como voy", "resumen", "situacion"):
+            parts = [f"Vas P{my_pos}" if my_pos else "Sin posición todavía"]
+            if ahead is not None:
+                g = self._gap_to(ahead)
+                if g is not None and 0 < g < 60:
+                    parts.append(f"a {self.fmt_gap(g)} del de adelante")
+            if behind is not None:
+                g = self._gap_to(behind)
+                if g is not None and -60 < g < 0:
+                    parts.append(f"{self.fmt_gap(-g)} sobre el de atrás")
+            fuel, per_lap, left = self._fuel_numbers()
+            if per_lap:
+                laps_f = int(fuel / per_lap)
+                parts.append(f"combustible para {laps_f} vuelta" + ("" if laps_f == 1 else "s"))
+            return ", ".join(parts) + "."
+
+        return ("No entendí. Pregúntame por daños, combustible, pits, neumáticos, límites, "
+                "el de adelante o atrás, vueltas, tiempos o dónde pierdes.")
+
+    def _rival_answer(self, idx: int, where: str) -> str:
+        gap = self._gap_to(idx)
+        if gap is None:
+            return f"No tengo el gap del de {where}."
+        g = abs(gap)
+        rival = self.cars[idx]
+        key = (idx, "a" if where == "adelante" else "b")
+        rate = self._gap_rate(self.gap_history.get(key, []))
+        msg = f"{self.car_label(idx).capitalize()} {where} a {self.fmt_gap(g)}"
+        if abs(rate) > 0.05:
+            if where == "adelante":
+                msg += f", le descuentas {self.fmt_gap(rate)} por vuelta" if rate > 0 else f", se escapa {self.fmt_gap(-rate)} por vuelta"
+            else:
+                msg += f", te descuenta {self.fmt_gap(rate)} por vuelta" if rate > 0 else f", lo alejas {self.fmt_gap(-rate)} por vuelta"
+        my = self.cars[self.me].laps
+        if rival.laps and my:
+            d = rival.laps[-1] - my[-1]
+            msg += f". Su última vuelta fue {self.fmt_lap(rival.laps[-1])}, " + (
+                f"{self.fmt_gap(d)} más lento que tú" if d > 0 else f"{self.fmt_gap(-d)} más rápido que tú")
+        c = self.cars[idx]
+        if c.on_pit:
+            msg += ". Está en pits"
+        return msg + "."
 
     # ------------------------------------------------- ingeniero de setup
     def _check_setup_report(self):
@@ -1156,7 +1556,7 @@ class LiveEngineer:
         if per["mid_under"] >= 1.5:
             recs.append(f"Subviraje en el medio de curva ({zone(h['mid_under'])}): ablanda la barra delantera "
                         f"o endurece la trasera. En curvas rápidas, menos ala trasera.")
-        if per["exit_slides"] >= 0.8 or spin >= 20:
+        if per["exit_slides"] >= 0.8 or spin >= 1.0:
             recs.append(f"Sobreviraje y patinaje en la salida ({zone(h['exit_slides'] or h['spin_pcts'])}): control de tracción "
                         f"más un clic, barra trasera más blanda, menos precarga del diferencial o más ala trasera.")
         self._temps_line = ""
@@ -1174,7 +1574,7 @@ class LiveEngineer:
         path = os.path.join(log_dir, time.strftime("setup_%Y%m%d_%H%M%S.txt"))
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"Reporte de setup ({laps} vueltas analizadas)\n")
-            f.write(f"Eventos por vuelta: {per}, patinaje medio {spin:.0f}\n")
+            f.write(f"Eventos por vuelta: {per}, patinaje medio {spin:.1f} s/vuelta\n")
             if self._temps_line:
                 f.write(self._temps_line + "\n")
             f.write("\nRecomendaciones:\n")
@@ -1198,9 +1598,13 @@ def main():
     parser = argparse.ArgumentParser(description="Ingeniero de carrera en vivo para iRacing")
     parser.add_argument("--nombre", default="Diego", help="Tu nombre para la radio")
     parser.add_argument("--sin-voz", action="store_true", help="Solo texto en consola")
-    parser.add_argument("--voz", default=DEFAULT_NEURAL_VOICE,
+    parser.add_argument("--voz", default=None,
                         help="Voz neuronal (ej: es-AR-TomasNeural, es-MX-JorgeNeural, es-CL-CatalinaNeural)")
     parser.add_argument("--voz-windows", action="store_true", help="Usar la voz clásica de Windows (sin internet)")
+    parser.add_argument("--asignar-boton", action="store_true",
+                        help="Aprieta el botón del volante que quieres usar para hablarle al ingeniero")
+    parser.add_argument("--tecla", default=None, help="Tecla push-to-talk alternativa (por defecto Insert)")
+    parser.add_argument("--sin-ptt", action="store_true", help="Desactivar las preguntas por voz")
     args = parser.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1209,8 +1613,31 @@ def main():
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt"))
+    from app.voice_commands import PushToTalk, load_config, save_config, wait_for_button
+    cfg = load_config()
+    if args.asignar_boton:
+        print("Aprieta el botón del volante que quieres usar para hablar (15 s)...", flush=True)
+        found = wait_for_button()
+        if not found:
+            print("No detecté ningún botón.")
+            return
+        cfg["ptt_joystick"], cfg["ptt_button"] = found
+        save_config(cfg)
+        print(f"Listo: botón {found[1]} de {found[0]} guardado.")
+        return
+    if args.tecla:
+        cfg["ptt_key"] = args.tecla
+        save_config(cfg)
+    if args.voz:
+        cfg["voice"] = args.voz
+        save_config(cfg)
+    voice = cfg.get("voice") or DEFAULT_NEURAL_VOICE
+
     eng = LiveEngineer(driver_name=args.nombre, speak=not args.sin_voz,
-                       neural_voice=None if args.voz_windows else args.voz, log_path=log_path)
+                       neural_voice=None if args.voz_windows else voice, log_path=log_path)
+    if not args.sin_ptt:
+        ptt = PushToTalk(on_text=eng.ask, on_error=lambda m: eng.emit(m, P_BATTLE + 5, ttl=6), config=cfg)
+        ptt.start()
     try:
         eng.run()
     except KeyboardInterrupt:

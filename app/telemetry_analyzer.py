@@ -12,6 +12,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.ibt_reader import IBTFile
+from app.track_limits import (TrackLimitTracker, gps_lateral_offsets, replay_files,
+                              save_tracker)
 
 G = 9.81
 KMH = 3.6
@@ -78,6 +80,7 @@ class AnalysisResult:
     tires: Dict[str, Dict[str, float]] = field(default_factory=dict)
     fuel_per_lap: float = 0.0
     setup: Dict[str, str] = field(default_factory=dict)
+    limit_zones: List[dict] = field(default_factory=list)
     # Trazas para gráficos (eje distancia en metros)
     dist: Optional[np.ndarray] = None
     traces: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
@@ -239,10 +242,15 @@ class TelemetryAnalyzer:
         apexes = self._detect_corners(best["Speed"], step)
         self._analyze_corners(apexes, data, grid, step)
         self._tires(valid)
+        try:
+            self._track_limits(valid)
+        except Exception as e:  # GPS ausente o datos raros: el resto del análisis sigue
+            print(f"[límites] no se pudo analizar: {e}")
         self._fuel()
         self._driving_recs(data, valid, step)
         self._setup_recs()
         self._consistency_recs(valid)
+        self._limit_recs()
         res.recommendations.sort(key=lambda r: r.priority)
         return res
 
@@ -369,6 +377,85 @@ class TelemetryAnalyzer:
                 for d in data.values())
             gain += seg_best_lap - seg_min
         res.theoretical_best = res.best_lap.time - gain
+
+    # ---------------------------------------------------- límites de pista
+    def _corner_name(self, s: float) -> str:
+        if not self.result.corners:
+            return f"a {s:.0f} m"
+        L = self.result.track_len
+        c = min(self.result.corners, key=lambda c: abs((s - c.apex_m + L / 2) % L - L / 2))
+        d = (s - c.apex_m + L / 2) % L - L / 2
+        where = "la entrada" if d < -40 else "la salida" if d > 40 else "el vértice"
+        return f"{where} de la C{c.number}"
+
+    def _track_limits(self, valid: List[Lap]):
+        res = self.result
+        L = res.track_len
+        good = {(l.file_idx, l.number) for l in res.laps if not l.pit}
+
+        def laps_ok(fi):
+            f = self.files[fi]
+            lap = f.get("Lap")
+            mask = np.array([(fi, int(n)) in good for n in lap])
+            return mask & (f.get("Speed") > 15) & (f.get("PlayerTrackSurface") != 0)
+
+        e = gps_lateral_offsets(self.files, laps_ok)
+        if all(x is None for x in e):
+            return
+        # Pasada 1: aprender dónde están los límites (de tus salidas reales)
+        learned, _ = replay_files(self.files, L, e)
+        if not learned.zones:
+            return
+        # Pasada 2: medir cada vuelta contra el límite ya conocido
+        fixed = TrackLimitTracker(L)
+        fixed.zones = [dict(z, samples=[]) for z in learned.zones]
+        _, exits = replay_files(self.files, L, e, tracker=fixed, learn_limits=False)
+        for z in fixed.zones:
+            rows = [x for x in exits if x[2] is z["s"] or abs(x[2] - z["s"]) < 1 and (x[0], x[1]) in good]
+            rows = [x for x in rows if (x[0], x[1]) in good]
+            if not rows:
+                continue
+            seen, laps = set(), []
+            for fi, lap, _, margin, exit_kmh, off in rows:
+                if lap in seen:
+                    continue
+                seen.add(lap)
+                laps.append({"lap": lap, "margin": margin, "exit_kmh": exit_kmh, "off": off})
+            res.limit_zones.append({
+                "s": z["s"], "side": z["side"], "name": self._corner_name(z["s"]),
+                "laps": laps, "gain": TrackLimitTracker.exit_gain(z)})
+        # Guardar para el ingeniero en vivo (zonas + mapa de rumbo de la pista)
+        try:
+            save_tracker(res.track, learned)
+        except Exception:
+            pass
+
+    def _limit_recs(self):
+        R = self.result.recommendations
+        for z in self.result.limit_zones:
+            offs = [l for l in z["laps"] if l["off"]]
+            clean = [l for l in z["laps"] if not l["off"]]
+            side = "izquierdo" if z["side"] > 0 else "derecho"
+            parts = [f"Te pasaste en {len(offs)} de {len(z['laps'])} vueltas"
+                     + (f" (hasta {abs(min(l['margin'] for l in offs)) * 100:.0f} cm afuera)" if offs else "") + "."]
+            if clean:
+                lo = min(l["margin"] for l in clean)
+                hi = max(l["margin"] for l in clean)
+                best = max(clean, key=lambda l: l["exit_kmh"])
+                parts.append(f"En las vueltas limpias dejaste entre {max(lo, 0) * 100:.0f} y {hi * 100:.0f} cm de margen. "
+                             f"Tu mejor salida limpia fue con {max(best['margin'], 0) * 100:.0f} cm "
+                             f"({best['exit_kmh']:.0f} km/h).")
+                if offs:
+                    off_exit = np.mean([l["exit_kmh"] for l in offs])
+                    parts.append(f"Saliéndote no ganas: salida media {off_exit:.0f} km/h fuera vs "
+                                 f"{np.mean([l['exit_kmh'] for l in clean]):.0f} km/h limpia.")
+            if z["gain"] and z["gain"][0] > 1:
+                parts.append(f"Cuando apuras el límite sin pasarte sales {z['gain'][0]:.0f} km/h más rápido.")
+            target = 30 if offs else 15
+            parts.append(f"Objetivo: dejar unos {target} cm de margen del lado {side}.")
+            R.append(Recommendation(
+                "Límites de pista", 1 if offs else 3,
+                f"Límite en {z['name']} ({z['s']:.0f} m, lado {side})", " ".join(parts)))
 
     # -------------------------------------------------------- neumáticos
     def _tires(self, valid: List[Lap]):
@@ -658,6 +745,13 @@ def format_report(res: AnalysisResult) -> str:
                          f"{c.min_speed_best:5.0f}/{c.min_speed_avg:<5.0f}     {c.exit_speed_best:5.0f}/{c.exit_speed_avg:<5.0f}"
                          f"      {bm:>9}  {c.time_loss_avg:6.2f}s  {c.understeer_deg:+5.1f}°  {c.wheelspin:5.0f}%  "
                          f"{c.lockups:6.0f}%  {c.abs_pct:3.0f}%  {c.offtracks:4d}")
+        lines.append("")
+    if res.limit_zones:
+        lines.append("LÍMITES DE PISTA (margen al límite por vuelta; negativo = te pasaste)")
+        for z in res.limit_zones:
+            laps = "  ".join(f"V{l['lap']}:{l['margin'] * 100:+.0f}cm/{l['exit_kmh']:.0f}" + ("✗" if l["off"] else "")
+                             for l in z["laps"])
+            lines.append(f"  {z['name']:<20} {z['s']:6.0f} m  lado {'izq' if z['side'] > 0 else 'der'}  {laps}")
         lines.append("")
     if res.tires:
         lines.append("NEUMÁTICOS (temperatura media en vueltas válidas, °C)")

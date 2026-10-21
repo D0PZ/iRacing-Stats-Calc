@@ -55,7 +55,18 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - Attack/defend calls with gap trend ("you catch him in 3 laps"), and where a rival is faster than you
 - Tire/slide warnings, ABS overuse, in-car adjustments (brake bias, TC), fuel to the finish, laps remaining
 - Setup report every time you return to the pits (saved to `logs/`)
+- Reads telemetry at iRacing's native 60 Hz (waits on the SDK data-ready event, no polling delay)
+- **Ask by voice** (push-to-talk on a wheel button or the Insert key): damage, fuel, pit strategy, tires,
+  track limits, gaps to the car ahead/behind, laps left, lap times, where you lose time, engine temps,
+  brake bias/TC/ABS, "silencio" to mute non-critical calls. Assign the wheel button with `asignar_boton.bat`
+- **Track limits**: warns before zones where you exceed the limit, calls each excursion with its corner and
+  praises clean full-curb exits. Zones are learned from your `.ibt` files (GPS) and from live excursions,
+  stored per track in `data/track_limits/`
 - Run it standalone with `ingeniero.bat` or `python -m app.live_engineer --voz es-AR-TomasNeural`
+
+### 📏 Track limits from .ibt (GPS)
+- Learns each limit from your real off-track moments and measures, lap by lap, how many centimetres you
+  had left (or went over) at that spot, plus your exit speed — so you see whether using the limit pays off
 
 ### 🎨 Modern Interface
 - **Native Dark Mode**: Professional dark theme GitHub-style

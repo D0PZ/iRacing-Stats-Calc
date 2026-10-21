@@ -13,6 +13,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
 
 PRIORITY_LABEL = {1: "ALTA", 2: "MEDIA", 3: "INFO"}
+DEFAULT_VOICE = "es-CL-LorenzoNeural"
+VOICES = [DEFAULT_VOICE, "es-CL-CatalinaNeural", "es-AR-TomasNeural", "es-AR-ElenaNeural",
+          "es-MX-JorgeNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural", "es-CO-GonzaloNeural",
+          "es-US-AlonsoNeural"]
 
 
 def default_telemetry_dir() -> str:
@@ -112,9 +116,28 @@ class TelemetryView:
         if res.corners:
             self._corner_table(body, res)
             self._loss_chart(body, res)
+        if res.limit_zones:
+            self._limits(body, res)
         if res.tires:
             self._tires(body, res)
         self._laps(body, res)
+
+    def _limits(self, body, res):
+        c = self.c
+        f = self._frame(body, "Límites de pista (margen al límite en cada vuelta, medido con GPS)")
+        tk.Label(f, text="Positivo = te sobró espacio · negativo = te pasaste · km/h = velocidad de salida",
+                 bg=c['bg_card'], fg=c['text_muted'], font=('Segoe UI', 8, 'italic')).pack(anchor=tk.W)
+        for z in res.limit_zones:
+            row = tk.Frame(f, bg=c['bg_card'])
+            row.pack(fill=tk.X, pady=4)
+            side = "izq." if z["side"] > 0 else "der."
+            tk.Label(row, text=f"{z['name'].capitalize()}  ({z['s']:.0f} m, lado {side})", bg=c['bg_card'],
+                     fg=c['accent_cyan'], font=('Segoe UI', 10, 'bold'), width=34, anchor=tk.W).pack(side=tk.LEFT)
+            for lap in z["laps"]:
+                off = lap["off"]
+                col = c['accent_red'] if off else c['accent_green'] if lap["margin"] < 0.3 else c['text_primary']
+                tk.Label(row, text=f"V{lap['lap']}  {lap['margin'] * 100:+.0f} cm\n{lap['exit_kmh']:.0f} km/h",
+                         bg=c['bg_secondary'], fg=col, font=('Consolas', 9), padx=6, pady=2).pack(side=tk.LEFT, padx=2)
 
     def _frame(self, parent, title):
         c = self.c
@@ -283,6 +306,7 @@ class LiveEngineerView:
         self.thread = None
         self.messages = []
         self.log_widget = None
+        self.ptt = None
 
     def show(self):
         app, c = self.app, self.c
@@ -294,12 +318,39 @@ class LiveEngineerView:
                             "neumáticos, frenos, combustible y setup al entrar a pits.",
                  bg=c['bg_dark'], fg=c['text_secondary'], font=('Segoe UI', 11),
                  wraplength=900, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
+        from app.voice_commands import load_config
+        from app.live_engineer import DEFAULT_NEURAL_VOICE
+        cfg = load_config()
         running = self.thread is not None and self.thread.is_alive()
         btn = tk.Button(main, text="⏹ Detener ingeniero" if running else "▶ Iniciar ingeniero",
                         command=self.toggle,
                         bg=c['accent_red'] if running else c['accent_green'], fg=c['bg_dark'],
                         font=('Segoe UI', 12, 'bold'), relief=tk.FLAT, cursor='hand2', padx=25, pady=10)
         btn.pack(anchor=tk.W)
+
+        # Configuración: voz y push-to-talk
+        conf = tk.LabelFrame(main, text=" Radio ", bg=c['bg_card'], fg=c['accent_blue'],
+                             font=('Segoe UI', 11, 'bold'), padx=12, pady=10)
+        conf.pack(fill=tk.X, pady=(15, 0))
+        tk.Label(conf, text="Voz:", bg=c['bg_card'], fg=c['text_secondary'], font=('Segoe UI', 10)).grid(
+            row=0, column=0, sticky=tk.W)
+        self.voice_var = tk.StringVar(value=cfg.get("voice") or DEFAULT_NEURAL_VOICE)
+        menu = tk.OptionMenu(conf, self.voice_var, *VOICES, command=self._save_voice)
+        menu.config(bg=c['bg_secondary'], fg=c['text_primary'], relief=tk.FLAT, highlightthickness=0)
+        menu.grid(row=0, column=1, sticky=tk.W, padx=8)
+        btn_ptt = cfg.get("ptt_button")
+        ptt_text = (f"botón {btn_ptt} de {cfg.get('ptt_joystick')}" if btn_ptt is not None else "sin botón asignado") + \
+            f"  •  tecla {str(cfg.get('ptt_key', 'insert')).upper()}"
+        self.ptt_label = tk.Label(conf, text=f"Hablar con el ingeniero: {ptt_text}", bg=c['bg_card'],
+                                  fg=c['text_secondary'], font=('Segoe UI', 10))
+        self.ptt_label.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        tk.Button(conf, text="🎮 Asignar botón del volante", command=self._assign_button,
+                  bg=c['accent_purple'], fg=c['bg_dark'], font=('Segoe UI', 10, 'bold'), relief=tk.FLAT,
+                  cursor='hand2', padx=12, pady=4).grid(row=1, column=2, padx=10, pady=(8, 0))
+        tk.Label(conf, text='Mantén el botón, pregunta ("¿cuánto combustible me queda?", "¿tengo daño?", '
+                            '"¿a cuánto está el de adelante?", "silencio"...) y suelta.',
+                 bg=c['bg_card'], fg=c['text_muted'], font=('Segoe UI', 9), wraplength=850,
+                 justify=tk.LEFT).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
         f = tk.LabelFrame(main, text=" Radio ", bg=c['bg_card'], fg=c['accent_blue'],
                           font=('Segoe UI', 11, 'bold'), padx=10, pady=10)
         f.pack(fill=tk.BOTH, expand=True, pady=15)
@@ -323,11 +374,45 @@ class LiveEngineerView:
         log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
         os.makedirs(log_dir, exist_ok=True)
         import time
-        self.engineer = LiveEngineer(on_message=self._on_message,
+        from app.voice_commands import PushToTalk, load_config
+        from app.live_engineer import P_BATTLE
+        cfg = load_config()
+        self.engineer = LiveEngineer(on_message=self._on_message, neural_voice=cfg.get("voice") or DEFAULT_VOICE,
                                      log_path=os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt")))
+        if self.ptt is None:
+            self.ptt = PushToTalk(on_text=lambda t: self.engineer and self.engineer.ask(t),
+                                  on_error=lambda m: self.engineer and self.engineer.emit(m, P_BATTLE + 5, ttl=6),
+                                  config=cfg)
+            self.ptt.start()
         self.thread = threading.Thread(target=self.engineer.run, daemon=True)
         self.thread.start()
         self.show()
+
+    def _save_voice(self, value):
+        from app.voice_commands import load_config, save_config
+        cfg = load_config()
+        cfg["voice"] = value
+        save_config(cfg)
+
+    def _assign_button(self):
+        from app.voice_commands import load_config, save_config, wait_for_button
+        self.ptt_label.config(text="Aprieta ahora el botón del volante que quieres usar (15 s)...",
+                              fg=self.c['accent_yellow'])
+
+        def work():
+            found = wait_for_button()
+
+            def done():
+                if not found:
+                    self.ptt_label.config(text="No detecté ningún botón. Intenta de nuevo.", fg=self.c['accent_red'])
+                    return
+                cfg = load_config()
+                cfg["ptt_joystick"], cfg["ptt_button"] = found
+                save_config(cfg)
+                self.ptt_label.config(text=f"Listo: botón {found[1]} de {found[0]}. Reinicia el ingeniero para usarlo.",
+                                      fg=self.c['accent_green'])
+            self.app.root.after(0, done)
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_message(self, text, priority):
         import time
