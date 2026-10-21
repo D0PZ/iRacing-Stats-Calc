@@ -281,6 +281,13 @@ class LiveEngineer:
         self._rumble_side = 0
         self._rumble_t = -99.0
         self.stint_start_lap = 0
+        # Pits, clima y delta en vivo
+        self.pit_limit_kmh: Optional[float] = None
+        self.prev_wetness = None
+        self.prev_precip = 0.0
+        self.lap_trace: List[float] = [math.nan] * PROFILE_BINS     # tiempo de vuelta por posición
+        self.best_trace: Optional[List[float]] = None
+        self.best_trace_time = math.inf
 
     @staticmethod
     def _new_lap_stats():
@@ -464,6 +471,12 @@ class LiveEngineer:
                     print(f"[límites] {len(self.limits.zones)} zonas de límite conocidas en {name}", flush=True)
         except Exception:
             pass
+        try:
+            self.pit_limit_kmh = self._nums(self.ir["WeekendInfo"]["TrackPitSpeedLimit"])[0]
+            if "mph" in str(self.ir["WeekendInfo"]["TrackPitSpeedLimit"]):
+                self.pit_limit_kmh *= 1.609
+        except Exception:
+            pass
         info = self.ir["DriverInfo"] or {}
         self.me = info.get("DriverCarIdx", -1)
         try:
@@ -523,12 +536,15 @@ class LiveEngineer:
         self._check_setup_report()
         if not ir["IsOnTrack"]:
             return
+        self._check_pits()
         self._check_hazards()
         self._driver_dynamics()
         self._track_limits_live()
+        self._record_lap_trace()
         self._rival_events()
         if self._tick_n % SLOW_EVERY == 0:
             self._check_traffic()
+            self._check_weather()
         self._check_lap_complete()
         self._check_incidents_and_warnings()
 
@@ -862,6 +878,7 @@ class LiveEngineer:
         self.fuel_at_lap_start = fuel
         self.lap_stats = self._new_lap_stats()
         lap_segs, self.my_lap_segs = self.my_lap_segs, {}
+        self._close_lap_trace(lap_time, clean)
         for kind in ("entry_slides", "exit_slides", "entry_under", "mid_under"):
             self.session_handling[kind].extend(st[kind])
         self.session_handling["spin_pcts"].extend(st["spin_pcts"])
@@ -1135,6 +1152,74 @@ class LiveEngineer:
         self.prev_warnings = warn
 
 
+    # ------------------------------------------------------------ pit lane
+    def _check_pits(self):
+        """Limitador y velocidad en pits: una penalización por exceso es evitable"""
+        ir = self.ir
+        limit = self.pit_limit_kmh
+        if not limit:
+            return
+        v = (ir["Speed"] or 0.0) * 3.6
+        limiter = bool(int(ir["EngineWarnings"] or 0) & irsdk.EngineWarnings.pit_speed_limiter)
+        surface = ir["PlayerTrackSurface"]
+        if ir["OnPitRoad"]:
+            if not limiter and v > limit * 0.6:
+                self.emit("¡Limitador!", P_SAFETY, key="limiter", cooldown=4, ttl=2)
+            if v > limit + 0.5:
+                self.emit(f"¡Velocidad en pits! {v:.0f}, el límite es {limit:.0f}.", P_SAFETY,
+                          key="pitspeed", cooldown=3, ttl=2)
+        elif surface == 2 and not limiter and v > limit + 20:  # aproximándose a la entrada de pits
+            self.emit(f"Entrada de pits, frena a {limit:.0f} y limitador.", P_SAFETY, key="pitentry",
+                      cooldown=20, ttl=3)
+
+    # --------------------------------------------------------------- clima
+    def _check_weather(self):
+        ir = self.ir
+        wet = ir["TrackWetness"]
+        precip = ir["Precipitation"] or 0.0
+        if wet is not None:
+            if self.prev_wetness is not None and wet != self.prev_wetness:
+                if wet > self.prev_wetness and wet >= 3:
+                    self.emit("La pista se está mojando, agarre cambiando. Frena antes y cuidado con los pianos.",
+                              P_FLAG, key="wetter", cooldown=120, ttl=10)
+                elif wet < self.prev_wetness and self.prev_wetness >= 3:
+                    self.emit("La pista se está secando, vas a tener más agarre vuelta a vuelta.", P_CAR,
+                              key="drier", cooldown=120, ttl=10)
+            self.prev_wetness = wet
+        if precip > 0.05 and self.prev_precip <= 0.05:
+            self.emit("Empieza a llover.", P_FLAG, key="rain", cooldown=180, ttl=10)
+        self.prev_precip = precip
+
+    # ------------------------------------------------- delta contra tu mejor
+    def _record_lap_trace(self):
+        ir = self.ir
+        pct, cur = ir["LapDistPct"], ir["LapCurrentLapTime"]
+        if pct is None or cur is None or pct < 0 or cur <= 0:
+            return
+        b = int(pct * PROFILE_BINS) % PROFILE_BINS
+        if math.isnan(self.lap_trace[b]):
+            self.lap_trace[b] = cur
+
+    def _close_lap_trace(self, lap_time: float, clean: bool):
+        trace, self.lap_trace = self.lap_trace, [math.nan] * PROFILE_BINS
+        filled = sum(not math.isnan(x) for x in trace)
+        if clean and lap_time > 0 and filled > PROFILE_BINS * 0.9 and lap_time < self.best_trace_time:
+            self.best_trace, self.best_trace_time = trace, lap_time
+
+    def live_delta(self) -> Optional[float]:
+        """Delta de la vuelta actual contra tu mejor (positivo = más lento)"""
+        ir = self.ir
+        if ir["LapDeltaToBestLap_OK"]:
+            return ir["LapDeltaToBestLap"]
+        pct, cur = ir["LapDistPct"], ir["LapCurrentLapTime"]
+        if not self.best_trace or pct is None or cur is None or pct < 0.03:
+            return None
+        b = int(pct * PROFILE_BINS) % PROFILE_BINS
+        for k in range(b, -1, -1):
+            if not math.isnan(self.best_trace[k]):
+                return cur - self.best_trace[k]
+        return None
+
     # ------------------------------------------------- límites de pista (vivo)
     def _zone_key(self, z: dict) -> int:
         return int(round(z["s"] / 10))
@@ -1389,6 +1474,16 @@ class LiveEngineer:
             if len(self.my_best_segs) == N_SEGMENTS:
                 msg += f" Tu vuelta ideal es {self.fmt_lap(sum(self.my_best_segs.values()))}."
             return msg
+
+        if has("esta vuelta", "delta", "como voy en la vuelta", "voy arriba", "voy abajo"):
+            d = self.live_delta()
+            if d is None:
+                if self.best_trace and (ir["LapDistPct"] or 0) < 0.03:
+                    return "Recién cruzas la meta, pregúntame en un momento."
+                return "Necesito una vuelta limpia de referencia para darte el delta."
+            return (f"Vas {self.fmt_gap(d)} más lento que tu mejor vuelta." if d > 0.05 else
+                    f"Vas {self.fmt_gap(-d)} más rápido que tu mejor vuelta, sigue así." if d < -0.05 else
+                    "Vas clavado en tu mejor vuelta.")
 
         if has("vuelta", "tiempo", "record"):
             last = ir["LapLastLapTime"]
