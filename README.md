@@ -41,6 +41,22 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - **Points projection**: Estimates your future championship points
 - **Confidence intervals**: Prediction ranges with certainty levels
 
+### 🔧 Telemetry & Setup Analysis (.ibt)
+- **Reads iRacing telemetry files** directly (record in-sim with `Alt+L`); split recordings of the same session are merged
+- **Corner-by-corner analysis**: braking point, minimum/exit speed, time lost vs your best pass, understeer angle, wheelspin, lockups, ABS usage, track-limit excursions
+- **Theoretical best lap** from your best pass through each corner
+- **Tire temperatures** (outer/middle/inner under load), hot pressures and wear → camber and pressure advice
+- **Setup and driving recommendations** mapped to the garage fields (ARBs, wing, camber, brake bias, TC, ABS, fuel)
+- CLI: `python -m app.telemetry_analyzer "path/to/file.ibt"`
+
+### 🎙️ Live Race Engineer (voice)
+- Connects to iRacing in real time and talks to you during the session (Spanish, natural neural voice via `edge-tts`, falls back to Windows voice offline)
+- Stopped/spun cars ahead, flags, rivals pitting or going off, traffic and faster classes
+- Attack/defend calls with gap trend ("you catch him in 3 laps"), and where a rival is faster than you
+- Tire/slide warnings, ABS overuse, in-car adjustments (brake bias, TC), fuel to the finish, laps remaining
+- Setup report every time you return to the pits (saved to `logs/`)
+- Run it standalone with `ingeniero.bat` or `python -m app.live_engineer --voz es-AR-TomasNeural`
+
 ### 🎨 Modern Interface
 - **Native Dark Mode**: Professional dark theme GitHub-style
 - **Responsive design**: Adapts to different window sizes

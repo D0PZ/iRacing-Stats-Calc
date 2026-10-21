@@ -77,3 +77,4 @@ Thumbs.db
 *.json
 !package.json
 ml_models/
+logs/
