@@ -172,6 +172,16 @@ The application uses several scikit-learn algorithms:
 - Accuracy and confidence metrics
 - Feature importance
 
+## 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
+The tests build synthetic `.ibt` files in iRacing's binary format and drive the live engineer with a fake
+SDK, so they run without iRacing or recorded telemetry.
+
 ## 🔧 Build Executable
 
 To create a standalone executable:
