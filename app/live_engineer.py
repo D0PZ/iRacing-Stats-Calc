@@ -341,8 +341,11 @@ class LiveEngineer:
     @staticmethod
     def fmt_gap(t: float) -> str:
         t = abs(t)
-        if t < 1.0:
-            return f"{int(round(t * 10))} décimas"
+        tenths = int(round(t * 10))
+        if tenths < 10:
+            return "una décima" if tenths <= 1 else f"{tenths} décimas"
+        if round(t, 1) == 1.0:
+            return "un segundo"
         return f"{t:.1f} segundos"
 
     def ref_lap(self) -> float:
@@ -1029,7 +1032,8 @@ class LiveEngineer:
                            f"está a {self.fmt_gap(gap_a)}.")
                     if left is not None:
                         if laps_to <= left:
-                            msg += f" Lo alcanzas en unas {laps_to} vueltas."
+                            msg += (" Lo alcanzas en la próxima vuelta." if laps_to <= 1
+                                    else f" Lo alcanzas en unas {laps_to} vueltas.")
                         else:
                             need = (gap_a - 0.3) / max(left, 1)
                             msg += f" A este ritmo no llegas, necesitas {self.fmt_gap(need)} por vuelta."
@@ -1059,7 +1063,8 @@ class LiveEngineer:
                     msg += f", te descuenta {self.fmt_gap(rate)} por vuelta." if rate > 0.1 else "."
                     if rate > 0.1 and left is not None and g > 0.8:
                         laps_to = math.ceil((g - 0.3) / rate)
-                        msg += (f" Te alcanza en unas {laps_to} vueltas." if laps_to <= left
+                        msg += ((" Te alcanza en la próxima vuelta." if laps_to <= 1
+                                 else f" Te alcanza en unas {laps_to} vueltas.") if laps_to <= left
                                 else " A este ritmo no te alcanza antes del final.")
                     best_seg = self._segment_advantage(rival.seg_times, me_segs)
                     if best_seg:

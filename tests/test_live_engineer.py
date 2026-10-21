@@ -131,3 +131,12 @@ def test_session_change_resets_fuel_history(eng):
     # Historial borrado y referencia de combustible tomada de la sesión nueva (20 L), no la vieja (50 L)
     assert eng.my_laps == []
     assert eng.fuel_at_lap_start == pytest.approx(20.0)
+
+
+def test_gap_phrasing():
+    f = le.LiveEngineer.fmt_gap
+    assert f(0.04) == "una décima"
+    assert f(0.43) == "4 décimas"
+    assert f(0.97) == "un segundo"
+    assert f(1.04) == "un segundo"
+    assert f(2.37) == "2.4 segundos"
