@@ -140,3 +140,26 @@ def test_gap_phrasing():
     assert f(0.97) == "un segundo"
     assert f(1.04) == "un segundo"
     assert f(2.37) == "2.4 segundos"
+
+
+def test_main_brake_per_corner(eng):
+    tick(eng)
+    eng.track_len = 4000.0
+    eng.corners = [1000 / 4000, 1300 / 4000]     # vértices en 1000 m y 1300 m
+    brakes = [[700.0, 0.9],      # frenada fuerte para la curva 1
+              [950.0, 0.2],      # toque de freno cerca del vértice: no es la principal
+              [1150.0, 0.7]]     # curva 2 (no puede tomar la frenada de la curva 1: está antes de su vértice previo)
+    by = eng._brakes_by_corner(brakes)
+    assert by == {0: 700.0, 1: 1150.0}
+
+
+def test_corner_reference_question(eng):
+    tick(eng)
+    eng.track_len = 4000.0
+    eng.refs = {"corners": [{"n": 1, "apex_m": 1000.0, "brake_at_m": 880.0, "brake_m_before": 120.0,
+                             "brake_peak": 70.0, "min_kmh": 85.0, "gear": 2, "throttle_m": 25.0}]}
+    eng.corners = [0.25]
+    eng.ask("¿dónde freno en la curva 1?")
+    tick(eng)
+    out = texts(eng)[-1]
+    assert "metro 880" in out and "120 metros antes" in out and "85" in out

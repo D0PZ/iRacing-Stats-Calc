@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.ibt_reader import IBTFile
+from app.references import save_references
 from app.track_limits import (TrackLimitTracker, gps_lateral_offsets, replay_files,
                               save_tracker)
 
@@ -257,6 +258,10 @@ class TelemetryAnalyzer:
         self._consistency_recs(valid)
         self._limit_recs()
         res.recommendations.sort(key=lambda r: r.priority)
+        try:
+            save_references(res.track, res.car, res.track_len, res.corners)
+        except Exception:
+            pass
         return res
 
     def _read_setup(self):
@@ -318,11 +323,21 @@ class TelemetryAnalyzer:
                 v = d["Speed"][idx]
                 mins[num] = v.min() * KMH
                 exits[num] = v[-1] * KMH
-                br = d["Brake"][idx[:apex_rel + 1]]
-                hit = np.flatnonzero(br > 0.1)
-                if len(hit):
-                    brakes[num] = (apex_rel - hit[0]) * step  # metros antes del vértice
-                    peaks[num] = float(br.max()) * 100
+                # Frenada de esta curva = última aplicación de freno antes del vértice (hasta 400 m atrás,
+                # aunque empiece antes de la ventana de la curva, p. ej. en curvas enlazadas)
+                prev_apex = apexes[k - 1] - (n if k == 0 else 0)
+                back = min(int(400 / step), apex - prev_apex - 1)   # nunca antes del vértice anterior
+                br = d["Brake"][np.arange(apex - back, apex + 1) % n]
+                # Separar aplicaciones de freno y quedarse con la principal (mayor presión; empate: la última)
+                pressed = br > 0.05
+                edges = np.diff(np.concatenate(([0], pressed.astype(int), [0])))
+                starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+                events = [(float(br[a:b].max()), a) for a, b in zip(starts, ends) if br[a:b].max() > 0.1]
+                if events:
+                    top = max(p for p, _ in events)
+                    peak, start = max((e for e in events if e[0] >= top - 0.05), key=lambda e: e[1])
+                    brakes[num] = (back - start) * step  # metros antes del vértice
+                    peaks[num] = peak * 100
                 # Vuelta al acelerador a fondo después del vértice (sostenido 20 m)
                 thr_after = d["Throttle"][idx[apex_rel:]]
                 hold = max(int(20 / step), 1)

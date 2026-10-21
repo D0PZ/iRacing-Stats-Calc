@@ -11,6 +11,7 @@ import queue
 import re
 import threading
 import time
+import re as _re
 import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ except ImportError:
     IRSDK_AVAILABLE = False
 
 from app.track_limits import load_tracker, save_tracker
+from app.references import load_references
 
 
 # Prioridades de mensajes (mayor = más urgente)
@@ -288,6 +290,13 @@ class LiveEngineer:
         self.lap_trace: List[float] = [math.nan] * PROFILE_BINS     # tiempo de vuelta por posición
         self.best_trace: Optional[List[float]] = None
         self.best_trace_time = math.inf
+        # Referencias de frenada por curva (del análisis de .ibt o de tu mejor vuelta en vivo)
+        self.car_name = ""
+        self.refs: Optional[dict] = None
+        self.lap_brakes: List[float] = []
+        self._brake_on = False
+        self.best_lap_brakes: Dict[int, float] = {}
+        self.last_lap_brakes: Dict[int, float] = {}
 
     @staticmethod
     def _new_lap_stats():
@@ -375,6 +384,8 @@ class LiveEngineer:
         self.speed_profile[b] = speed if old is None else 0.7 * old + 0.3 * speed
 
     def _detect_corners(self):
+        if self.refs:
+            return  # las curvas vienen del análisis de .ibt
         prof = self.speed_profile
         if sum(p is not None for p in prof) < PROFILE_BINS * 0.95:
             return
@@ -495,6 +506,15 @@ class LiveEngineer:
             self.drivers[d["CarIdx"]] = d
         if self.me in self.drivers:
             self.my_class = self.drivers[self.me].get("CarClassID")
+            car = str(self.drivers[self.me].get("CarScreenName", ""))
+            if car and car != self.car_name and self.track_name:
+                self.car_name = car
+                self.refs = load_references(self.track_name, car, self.track_len)
+                if self.refs:
+                    # Misma numeración de curvas que el reporte del analizador
+                    self.corners = [c["apex_m"] / self.track_len for c in self.refs["corners"]]
+                    print(f"[referencias] {len(self.corners)} curvas de referencia para {car} en "
+                          f"{self.track_name}", flush=True)
 
     # ---------------------------------------------------------------- tick
     def _tick(self):
@@ -782,6 +802,15 @@ class LiveEngineer:
 
         pct = ir["LapDistPct"]
         self._record_profile(pct, v)
+        if brk > 0.1 and not self._brake_on and v > 20:
+            self._brake_on = True
+            dist = ir["LapDist"]
+            if dist is not None and dist >= 0:
+                self.lap_brakes.append([float(dist), brk])   # [inicio, presión máxima]
+        elif brk < 0.03:
+            self._brake_on = False
+        if self._brake_on and self.lap_brakes:
+            self.lap_brakes[-1][1] = max(self.lap_brakes[-1][1], brk)
 
         if v < 15:
             self.slide_timer = self.under_timer = 0.0
@@ -882,6 +911,11 @@ class LiveEngineer:
         self.lap_stats = self._new_lap_stats()
         lap_segs, self.my_lap_segs = self.my_lap_segs, {}
         self._close_lap_trace(lap_time, clean)
+        brakes, self.lap_brakes = self.lap_brakes, []
+        self.last_lap_brakes = self._brakes_by_corner(brakes)
+        prev_clean = [l["time"] for l in self.my_laps[:-1] if l["time"] > 0]
+        if clean and (not prev_clean or lap_time < min(prev_clean)):
+            self.best_lap_brakes = dict(self.last_lap_brakes)
         for kind in ("entry_slides", "exit_slides", "entry_under", "mid_under"):
             self.session_handling[kind].extend(st[kind])
         self.session_handling["spin_pcts"].extend(st["spin_pcts"])
@@ -957,8 +991,9 @@ class LiveEngineer:
             if losses and lap_time - best_lap > 0.3:
                 seg = max(losses, key=losses.get)
                 if losses[seg] > 0.15:
+                    why = self._brake_cause((seg + 0.5) / N_SEGMENTS)
                     self.emit(f"Esa vuelta perdiste {self.fmt_gap(losses[seg])} {self.zone_name(seg)} "
-                              f"comparado con tu mejor.", P_INFO, key="coach",
+                              f"comparado con tu mejor.{why}", P_INFO, key="coach",
                               cooldown=self.ref_lap() * 1.8, ttl=12)
             if len(self.my_best_segs) == N_SEGMENTS and len(previous) >= 3:
                 ideal = sum(self.my_best_segs.values())
@@ -1311,6 +1346,71 @@ class LiveEngineer:
                           key="limoff", cooldown=6, ttl=5)
         self._prev_offtrack = off
 
+    # ------------------------------------------------ referencias de frenada
+    def _apexes_m(self) -> List[float]:
+        return [c * self.track_len for c in self.corners]
+
+    def _brakes_by_corner(self, brakes: List[list]) -> Dict[int, float]:
+        """
+        Frenada principal de cada curva: la de mayor presión en los 400 m previos al vértice
+        (empate: la más cercana). Misma definición que el analizador de .ibt.
+        """
+        out: Dict[int, tuple] = {}
+        apexes = self._apexes_m()
+        L = self.track_len
+        # Ventana de búsqueda de cada curva: hasta 400 m atrás, sin pasar del vértice anterior
+        reach = [min(400.0, (a - apexes[k - 1]) % L or L) for k, a in enumerate(apexes)]
+        for b, peak in brakes:
+            for k, a in enumerate(apexes):
+                d = (a - b) % L
+                if d >= reach[k]:
+                    continue
+                if k not in out or peak > out[k][1] + 0.05 or (abs(peak - out[k][1]) <= 0.05 and d < out[k][2]):
+                    out[k] = (b, peak, d)
+        return {k: v[0] for k, v in out.items()}
+
+    def ref_brake(self, k: int) -> Optional[float]:
+        if self.refs and k < len(self.refs["corners"]):
+            return self.refs["corners"][k].get("brake_at_m")
+        return self.best_lap_brakes.get(k)
+
+    def _brake_cause(self, pct: float) -> str:
+        """Explica la pérdida en una zona si la frenada fue distinta a tu referencia"""
+        apexes = self._apexes_m()
+        if not apexes:
+            return ""
+        s = pct * self.track_len
+        k = min(range(len(apexes)), key=lambda i: abs((s - apexes[i] + self.track_len / 2) % self.track_len
+                                                      - self.track_len / 2))
+        if abs((s - apexes[k] + self.track_len / 2) % self.track_len - self.track_len / 2) > self.track_len / N_SEGMENTS:
+            return ""
+        ref, mine = self.ref_brake(k), self.last_lap_brakes.get(k)
+        if ref is None or mine is None:
+            return ""
+        diff = ((mine - ref + self.track_len / 2) % self.track_len) - self.track_len / 2
+        if diff < -8:
+            return f" Frenaste {-diff:.0f} metros antes que tu referencia."
+        if diff > 8:
+            return f" Frenaste {diff:.0f} metros más tarde que tu referencia, te pasaste de frenada."
+        return ""
+
+    def _corner_ref_answer(self, k: int) -> str:
+        n = k + 1
+        if self.refs and k < len(self.refs["corners"]):
+            c = self.refs["corners"][k]
+            if c.get("brake_at_m") is None:
+                return f"La curva {n} es sin frenar, a {c['min_kmh']:.0f} kilómetros por hora en {c['gear']}a."
+            parts = [f"En la curva {n} frena en el metro {c['brake_at_m']:.0f}, "
+                     f"{c['brake_m_before']:.0f} metros antes del vértice, con {c['brake_peak']:.0f} por ciento de pedal",
+                     f"pasa a {c['min_kmh']:.0f} kilómetros por hora en {c['gear']}a"]
+            if c.get("throttle_m") is not None:
+                parts.append(f"y a fondo {c['throttle_m']:.0f} metros después del vértice")
+            return ", ".join(parts) + "."
+        ref = self.best_lap_brakes.get(k)
+        if ref is not None:
+            return f"En tu mejor vuelta frenaste para la curva {n} en el metro {ref:.0f}."
+        return f"Todavía no tengo referencia para la curva {n}. Analiza un archivo de telemetría de esta pista."
+
     # ---------------------------------------------------------- preguntas
     @staticmethod
     def _norm(text: str) -> str:
@@ -1441,6 +1541,13 @@ class LiveEngineer:
             if wet is not None and wet > 1:
                 msg += " La pista tiene humedad."
             return msg or "No tengo datos del clima."
+
+        m_curve = _re.search(r"(?:curva|la)\s+(\d{1,2})", n)
+        if m_curve and has("freno", "frenada", "frenar", "referencia", "como hago", "como tomo"):
+            k = int(m_curve.group(1)) - 1
+            if 0 <= k < max(len(self.corners), 1):
+                return self._corner_ref_answer(k)
+            return f"No tengo la curva {k + 1}, en esta pista conozco {len(self.corners)} curvas."
 
         if has("freno", "balance", "traccion", "tc", "abs"):
             bias, tc, abs_ = ir["dcBrakeBias"], ir["dcTractionControl"], ir["dcABS"]
