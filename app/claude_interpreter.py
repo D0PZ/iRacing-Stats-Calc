@@ -37,7 +37,11 @@ Reglas:
 - Empieza por la respuesta, sin saludos ni repetir la pregunta.
 - Sin símbolos ni markdown. Escribe las unidades con palabras (litros, segundos, grados, kilopascales).
 - Las temperaturas de neumáticos son de la última entrada a pits (exterior, centro, interior); iRacing no las da en pista.
-- Ajustes de neumáticos: el objetivo es interior sobre exterior según tire_targets y centro igual al promedio de los bordes."""
+- Ajustes de neumáticos: el objetivo es interior sobre exterior según tire_targets y centro igual al promedio de los bordes.
+- historial_esta_pista trae tus salidas ANTERIORES en esta misma pista con este auto, de cualquier sesión o día,
+  con su setup, lo medido en pits y el ritmo. ideales_por_rueda son los valores ideales estimados con todo ese
+  historial: úsalos cuando pregunten por presiones, camber o setup ideal aunque en esta sesión no haya mediciones.
+- setup_actual es el setup cargado ahora mismo (toe, barras, ala, presiones, camber, pastillas, etc.)."""
 
 
 def credentials_available() -> bool:

@@ -61,6 +61,8 @@ class FakeIR:
 def eng(monkeypatch, tmp_path):
     import app.tire_model as tm
     monkeypatch.setattr(tm, "BASE", str(tmp_path / "tire_model"))    # no tocar data/ del repo
+    import app.setup_db as sdb
+    monkeypatch.setattr(sdb, "BASE", str(tmp_path / "setups"))
     # Nunca usar la configuración real del piloto (ni llamar a Claude) en las pruebas
     monkeypatch.setattr("app.voice_commands.load_config", lambda: {"claude": {"enabled": False}})
     # No leer ni escribir los mapas de límites guardados en data/
@@ -351,3 +353,18 @@ def test_radio_commands_do_not_call_claude(eng):
     eng.ask("silencio")
     tick(eng)
     assert eng.claude.calls == [] and "silencio" in texts(eng)[-1].lower()
+
+
+def test_new_session_uses_history_for_ideal_pressures(eng, tmp_path):
+    """Otra sesión en la misma pista: sin mediciones nuevas, igual responde con el historial"""
+    from app.setup_db import SetupDB
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_setup_db import _setup
+    tick(eng)
+    eng.setup_db = SetupDB("Pista de Prueba", "Test", base=str(tmp_path / "db"))
+    eng.setup_db.add_stint(_setup(193, -2.8, 3, 7), [130.4, 130.9], session="Practice")
+    eng.ir.v["CarSetup"] = {"Tires": {"LeftFront": {"StartingPressure": "193 kPa", "LastTempsOMI": "44C, 44C, 44C"}}}
+    eng.ask("¿cuáles son las presiones ideales?")
+    tick(eng)
+    out = texts(eng)[-1]
+    assert "Ideales para" in out and "kilopascales" in out

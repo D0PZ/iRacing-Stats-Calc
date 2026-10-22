@@ -240,6 +240,8 @@ class LiveEngineer:
         self.last_spoken = ""
         self.on_track = False
         self.tire_model = None
+        self.setup_db = None
+        self._stint_offs = 0
         self.claude = self._init_claude()
         self.auto_record = auto_record
         self._we_record = False          # la grabación la inició el ingeniero
@@ -655,10 +657,72 @@ class LiveEngineer:
                                         if st.get("offs")}
         if self.refs and self.refs.get("plan"):
             snap["plan_qualy_carrera"] = self.refs["plan"]
+        try:
+            from app.setup_db import flatten_setup, key_setup
+            snap["setup_actual"] = key_setup(flatten_setup(ir["CarSetup"] or {}))
+        except Exception:
+            pass
+        if self.setup_db is not None and self.setup_db.stints:
+            sens = self.tire_model.state["sens"] if self.tire_model is not None else None
+            snap["historial_esta_pista"] = self.setup_db.summary(self._tire_targets(), sens, last_n=2)
         if self.tire_model is not None:
             snap["tire_targets"] = {"adelante_c": self.tire_model.target_spread("LF", self.track_name),
                                     "atras_c": self.tire_model.target_spread("LR", self.track_name)}
         return _drop_empty(snap)
+
+    # ------------------------------------------- base de setups por pista/auto
+    def _tire_targets(self) -> Dict[str, float]:
+        if self.tire_model is not None:
+            return {"front": self.tire_model.target_spread("LF", self.track_name),
+                    "rear": self.tire_model.target_spread("LR", self.track_name)}
+        return {"front": 7.0, "rear": 5.0}
+
+    def _store_stint(self, stint_laps: List[float], per_lap_events: dict, spin: float, recs: List[str]):
+        if self.setup_db is None:
+            return
+        ir = self.ir
+        fuel = [l["fuel"] for l in self.my_laps[-max(self.laps_since_setup, 1):] if l.get("fuel")]
+        try:
+            session = ""
+            sessions = ir["SessionInfo"]["Sessions"]
+            session = str(sessions[ir["SessionNum"]]["SessionType"])
+        except Exception:
+            pass
+        handling = {k: round(v, 2) for k, v in per_lap_events.items()}
+        handling["patinaje_s_por_vuelta"] = round(spin, 2)
+        rec = self.setup_db.add_stint(ir["CarSetup"] or {}, stint_laps, session=session,
+                                      track_temp=ir["TrackTempCrew"], air_temp=ir["AirTemp"], handling=handling,
+                                      fuel_per_lap=round(sum(fuel) / len(fuel), 3) if fuel else None,
+                                      offtracks=self._stint_offs, recommendations=recs)
+        self._stint_offs = 0
+        print(f"[setups] salida guardada ({rec['vueltas']} vueltas, "
+              f"{'con' if rec['medicion'] else 'sin'} temperaturas) -> {len(self.setup_db.stints)} en total",
+              flush=True)
+
+    def _ideal_phrases(self) -> List[str]:
+        """Valores ideales con todo tu historial en esta pista y auto (aunque sea otra sesión)"""
+        if self.setup_db is None:
+            return []
+        sens = self.tire_model.state["sens"] if self.tire_model is not None else None
+        ideals = self.setup_db.ideals(self._tire_targets(), sens)
+        if not ideals:
+            return []
+        names = {"LF": "delantera izquierda", "RF": "delantera derecha",
+                 "LR": "trasera izquierda", "RR": "trasera derecha"}
+        parts = []
+        for w, r in ideals.items():
+            bits = []
+            if r.get("presion_frio") is not None:
+                bits.append(f"{r['presion_frio']} kilopascales en frío")
+            if r.get("camber") is not None:
+                bits.append(f"camber {r['camber']:.1f}")
+            if bits:
+                parts.append(f"{names[w]} {' y '.join(bits)}")
+        n = max(r["salidas"] for r in ideals.values())
+        method = "ajustado con tus salidas" if any(r["metodo"].startswith("ajuste") for r in ideals.values()) \
+            else "estimado desde tu última salida medida"
+        return [f"Ideales para {self.track_name} según {n} salida{'s' if n != 1 else ''} medida{'s' if n != 1 else ''} "
+                f"({method}): " + "; ".join(parts) + "."]
 
     # ------------------------------------------------ grabación automática
     def _auto_recording(self):
@@ -792,6 +856,10 @@ class LiveEngineer:
             car = str(self.drivers[self.me].get("CarScreenName", ""))
             if car and car != self.car_name and self.track_name:
                 self.car_name = car
+                from app.setup_db import SetupDB
+                self.setup_db = SetupDB(self.track_name, car)
+                print(f"[setups] {len(self.setup_db.stints)} salidas guardadas para {car} en {self.track_name}",
+                      flush=True)
                 self.refs = load_references(self.track_name, car, self.track_len)
                 if self.refs:
                     # Misma numeración de curvas que el reporte del analizador
@@ -1644,6 +1712,7 @@ class LiveEngineer:
                 self.limits.zones.append(z)
             if z is not None:
                 z["offs"] = z.get("offs", 0) + 1
+                self._stint_offs += 1
                 self.limits_dirty = True
                 st = self.zone_state.setdefault(self._zone_key(z), {"offs": 0, "passes": 0, "best_exit": 0.0,
                                                                     "curb": 0})
@@ -1831,6 +1900,10 @@ class LiveEngineer:
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
 
+        if has("ideal", "ideales") and has("presion", "camber", "neumatico", "setup"):
+            phrases = self._ideal_phrases()
+            return phrases[0] if phrases else "Todavía no tengo salidas medidas en esta pista con este auto."
+
         if has("neumatico", "goma", "cubierta", "llanta", "rueda", "presion", "camber"):
             return self._tire_answer(n)
 
@@ -2017,7 +2090,7 @@ class LiveEngineer:
         from app.voice_commands import load_config
         data = read_setup(self.ir["CarSetup"] or {})
         if not measured(data):
-            return []
+            return self._ideal_phrases()   # sesión nueva: lo que sabemos de esta pista con este auto
         car = self.car_name or "auto"
         if self.tire_model is None or self.tire_model.car != car:
             self.tire_model = TireModel(car, load_config().get("tire_targets"))
@@ -2167,6 +2240,7 @@ class LiveEngineer:
         if not recs:
             recs.append("El auto se ve equilibrado en estas vueltas.")
         recs = recs[:2] + tire
+        self._store_stint(stint_laps, per, spin, recs)
 
         # Reporte completo en archivo
         import os
@@ -2175,6 +2249,7 @@ class LiveEngineer:
         path = os.path.join(log_dir, time.strftime("setup_%Y%m%d_%H%M%S.txt"))
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"Reporte de setup ({laps} vueltas analizadas)\n")
+            f.write(f"Pista: {self.track_name} | Auto: {self.car_name}\n")
             f.write(f"Eventos por vuelta: {per}, patinaje medio {spin:.1f} s/vuelta\n")
             if self._temps_line:
                 f.write(self._temps_line + "\n")
