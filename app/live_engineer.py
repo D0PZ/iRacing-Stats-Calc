@@ -1625,6 +1625,19 @@ class LiveEngineer:
             return "Daño: " + ", ".join(parts) + ". " + (
                 "La obligatoria hay que hacerla en pits." if rep_t > 0 else "Puedes seguir, la opcional es para recuperar rendimiento.")
 
+        if has("pastilla", "plan de qualy", "plan de carrera", "plan para", "qualy", "clasificacion"):
+            from app.session_plan import qualy_fuel
+            lines = list((self.refs or {}).get("plan") or [])
+            per_lap = self.fuel_per_lap_estimate()
+            if per_lap and has("qualy", "clasificacion", "plan"):
+                lines = [l for l in lines if not l.startswith("Qualy:")]
+                lines.insert(0, f"Qualy: carga {qualy_fuel(per_lap, 2):.1f} litros (salida y 2 vueltas lanzadas).")
+            if has("pastilla"):
+                lines = [l for l in lines if l.startswith(("Frenos", "Pastilla"))]
+            if not lines:
+                return "Todavía no tengo el plan: analiza un archivo de telemetría de esta pista con este auto."
+            return " ".join(lines)
+
         if has("para la carrera", "cargar para", "cuanto cargo", "cuanto combustible cargo"):
             plan = self.race_plan()
             if not plan:

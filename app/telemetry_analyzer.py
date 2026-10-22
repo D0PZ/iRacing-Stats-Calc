@@ -87,6 +87,9 @@ class AnalysisResult:
     fuel_per_lap: float = 0.0
     setup: Dict[str, str] = field(default_factory=dict)
     limit_zones: List[dict] = field(default_factory=list)
+    plan_lines: List[str] = field(default_factory=list)       # plan de qualy y carrera
+    pad_plan: Optional[dict] = None
+    brake_profile: Optional[dict] = None
     # Trazas para gráficos (eje distancia en metros)
     dist: Optional[np.ndarray] = None
     traces: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
@@ -253,13 +256,17 @@ class TelemetryAnalyzer:
         except Exception as e:  # GPS ausente o datos raros: el resto del análisis sigue
             print(f"[límites] no se pudo analizar: {e}")
         self._fuel()
+        try:
+            self._session_plan([l for l in self.result.laps if l.valid])
+        except Exception as e:
+            print(f"[plan] no se pudo calcular: {e}")
         self._driving_recs(data, valid, step)
         self._setup_recs()
         self._consistency_recs(valid)
         self._limit_recs()
         res.recommendations.sort(key=lambda r: r.priority)
         try:
-            save_references(res.track, res.car, res.track_len, res.corners, res.fuel_per_lap)
+            save_references(res.track, res.car, res.track_len, res.corners, res.fuel_per_lap, res.plan_lines)
         except Exception:
             pass
         return res
@@ -541,6 +548,33 @@ class TelemetryAnalyzer:
                 + (f" Saliste con {self._start_fuel():.1f} L, lo que obliga a parar en pits."
                    if self._start_fuel() and self._start_fuel() < need else "")))
 
+    def _session_plan(self, valid: List[Lap]):
+        from app import session_plan as sp
+        res = self.result
+        res.brake_profile = sp.brake_profile(self.files, valid)
+        mu_f = self._num(self._setup_value("FrontBrakePadMu") or "")
+        mu_r = self._num(self._setup_value("RearBrakePadMu") or "")
+        bias = None
+        biases = [self.files[l.file_idx].get("dcBrakeBias") for l in valid]
+        vals = [b[l.i0:l.i1] for b, l in zip(biases, valid) if b is not None]
+        if vals:
+            bias = float(np.median(np.concatenate(vals))) / 100
+        options = sp.pad_options_for(res.car)
+        if options and mu_f and mu_f not in options:
+            options = sorted(set(options) | {mu_f}, reverse=True)
+        res.pad_plan = sp.pad_plan(res.brake_profile, mu_f, mu_r, bias, options) if options else None
+        fuel = {}
+        if res.fuel_per_lap:
+            q_laps = sp.session_laps(self.info, "qual") or 2
+            fuel.update(qualy=sp.qualy_fuel(res.fuel_per_lap, q_laps), qualy_laps=q_laps)
+            r_laps = sp.session_laps(self.info, "race")
+            if r_laps:
+                fuel.update(race=sp.race_fuel(res.fuel_per_lap, r_laps), race_laps=r_laps)
+        res.plan_lines = sp.describe(res.pad_plan, res.brake_profile, fuel) if (res.pad_plan or fuel) else []
+        if res.plan_lines:
+            res.recommendations.append(Recommendation("Plan", 1, "Plan para qualy y carrera",
+                                                      " ".join(res.plan_lines)))
+
     def _start_fuel(self) -> Optional[float]:
         f = self.files[0].get("FuelLevel")
         return float(f[0]) if f is not None and len(f) else None
@@ -799,6 +833,20 @@ def format_report(res: AnalysisResult) -> str:
             if c.throttle_m_best is not None:
                 parts.append(f"a fondo {c.throttle_m_best:.0f} m después")
             lines.append(" · ".join(parts))
+        lines.append("")
+    if res.plan_lines:
+        lines.append("PLAN QUALY / CARRERA")
+        lines += [f"  {x}" for x in res.plan_lines]
+        if res.pad_plan:
+            lines.append("  Pastilla delantera: pedal con que entra el ABS (normal / frenadas fuertes) y balance "
+                         "para el mismo reparto")
+            for t in res.pad_plan["table"]:
+                mark = " ← hoy" if t["mu"] == res.pad_plan["current"]["mu"] else ""
+                mark += " ← carrera" if t["mu"] == res.pad_plan["race"]["mu"] else ""
+                mark += " ← qualy" if t["mu"] == res.pad_plan["qualy"]["mu"] else ""
+                over = "  (no llegas al ABS fuerte)" if t["hard"] > res.pad_plan["limit"] else ""
+                lines.append(f"    {t['mu']:.2f}: {t['onset'] * 100:3.0f}% / {t['hard'] * 100:3.0f}%  "
+                             f"balance {t['bias'] * 100:.1f}%{mark}{over}")
         lines.append("")
     if res.limit_zones:
         lines.append("LÍMITES DE PISTA (margen al límite por vuelta; negativo = te pasaste)")
