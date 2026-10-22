@@ -14,3 +14,4 @@ sounddevice>=0.4
 pygame>=2.5
 keyboard>=0.13
 anthropic>=2.1
+soundfile>=0.12

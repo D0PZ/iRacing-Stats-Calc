@@ -8,7 +8,6 @@ desgaste/deslizamiento de neumáticos, uso del ABS, combustible, etc.
 import math
 import os
 
-os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import queue
 import re
 import threading
@@ -133,33 +132,39 @@ URGENT_RATE = "+30%"     # llamadas urgentes: más rápidas
 DEFAULT_OUTPUTS = ["Auriculares", "Realtek(R) Audio"]
 
 
-def list_output_devices() -> List[str]:
+def _directsound_outputs() -> List[tuple]:
+    """(índice, nombre) de las salidas de audio vía DirectSound (permite elegir dispositivo exacto)"""
     try:
-        import pygame
-        import pygame._sdl2.audio as sdl_audio
-        if not pygame.get_init():
-            pygame.init()
-        return list(sdl_audio.get_audio_device_names(False))
+        import sounddevice as sd
+        apis = sd.query_hostapis()
+        out = []
+        for i, d in enumerate(sd.query_devices()):
+            api = apis[d["hostapi"]]["name"]
+            if d["max_output_channels"] > 0 and "DirectSound" in api and "primario" not in d["name"].lower() \
+                    and "primary" not in d["name"].lower():
+                out.append((i, d["name"]))
+        return out
     except Exception:
         return []
 
 
-def pick_output_device(preferences: Optional[List[str]] = None) -> Optional[str]:
-    """Primer dispositivo de salida cuyo nombre contiene alguna preferencia (en orden); None = el de Windows"""
-    try:
-        os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-        import pygame
-        import pygame._sdl2.audio as sdl_audio
-        if not pygame.get_init():
-            pygame.init()
-        names = sdl_audio.get_audio_device_names(False)
-    except Exception:
-        return None
+def list_output_devices() -> List[str]:
+    return [name for _, name in _directsound_outputs()]
+
+
+def pick_output_device(preferences: Optional[List[str]] = None) -> Optional[tuple]:
+    """(índice, nombre) del primer dispositivo que coincide con las preferencias; None = predeterminado"""
+    devices = _directsound_outputs()
     for pref in preferences or DEFAULT_OUTPUTS:
-        for name in names:
+        for idx, name in devices:
+            if name == pref:
+                return idx, name
+        for idx, name in devices:
             if pref.lower() in name.lower() and "digital output" not in name.lower():
-                return name
+                return idx, name
     return None
+
+
 # Frases urgentes pre-sintetizadas (latencia cero, misma voz). Se generan con URGENT_RATE.
 PREWARM_URGENT = (
     [f"¡Auto parado a {d}!" for d in range(100, 800, 100)]
@@ -182,14 +187,14 @@ class Voice:
         self.rate = rate
         self.outputs = outputs or DEFAULT_OUTPUTS
         self.device: Optional[str] = None
+        self.device_index: Optional[int] = None
         self._mixer_ready = False
         self.neural: Optional[NeuralTTS] = None
         self.q: "queue.PriorityQueue[Message]" = queue.PriorityQueue()
         self._stop = threading.Event()
         self._urgent = threading.Event()   # corta lo que se esté diciendo si llega un peligro
         if enabled:
-            # Abrir la salida (audífonos) aquí y no en el hilo de voz: allí la voz de Windows inicializa COM
-            # de una forma que impide al reproductor ver los dispositivos y caería al predeterminado
+            # Elegir la salida aquí, antes de que el hilo de voz inicialice COM para la voz de Windows
             try:
                 self._init_mixer()
             except Exception as e:
@@ -204,42 +209,31 @@ class Voice:
         self._thread.start()
 
     def _init_mixer(self):
-        """Reproductor en el dispositivo elegido (audífonos); si no está, el predeterminado de Windows"""
-        import pygame
-        try:
-            pygame.mixer.quit()
-        except Exception:
-            pass
-        self.device = pick_output_device(self.outputs)
-        try:
-            pygame.mixer.init(frequency=24000, channels=1, devicename=self.device) if self.device \
-                else pygame.mixer.init(frequency=24000, channels=1)
-            self._mixer_ready = True
-            print(f"[voz] salida de audio: {self.device or 'predeterminada de Windows'}", flush=True)
-        except Exception as e:
-            print(f"[voz] no pude abrir {self.device} ({e}); uso la salida predeterminada", flush=True)
-            self.device = None
-            pygame.mixer.init(frequency=24000, channels=1)
-            self._mixer_ready = True
+        """Elige la salida (la que configuraste); si no está conectada, la predeterminada de Windows"""
+        found = pick_output_device(self.outputs)
+        self.device_index, self.device = found if found else (None, None)
+        self._mixer_ready = True
+        print(f"[voz] salida de audio: {self.device or 'predeterminada de Windows'}", flush=True)
 
     def _play(self, path: str, interrupt: Optional[threading.Event] = None):
-        """Reproduce el mp3 en los audífonos; se corta si llega una urgencia"""
-        import pygame
+        """Reproduce el mp3 en el dispositivo elegido; se corta si llega una urgencia"""
+        import sounddevice as sd
+        import soundfile as sf
         if not self._mixer_ready:
             self._init_mixer()
+        data, sr = sf.read(path, dtype="float32")
         try:
-            pygame.mixer.music.load(path)
-            pygame.mixer.music.play()
+            sd.play(data, sr, device=self.device_index)
         except Exception:
-            self._init_mixer()   # se desconectó el dispositivo: reabrir (cae al predeterminado si no está)
-            pygame.mixer.music.load(path)
-            pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
+            self._init_mixer()   # se desconectó: volver a buscarlo (o el predeterminado)
+            sd.play(data, sr, device=self.device_index)
+        end = time.time() + len(data) / sr + 0.3
+        while time.time() < end:
             if interrupt is not None and interrupt.is_set():
-                pygame.mixer.music.stop()
-                break
+                sd.stop()
+                return
             time.sleep(0.02)
-        pygame.mixer.music.unload()
+        sd.wait()
 
     @staticmethod
     def rate_for(priority: int) -> Optional[str]:
