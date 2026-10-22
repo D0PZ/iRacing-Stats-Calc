@@ -116,7 +116,7 @@ class SetupDB:
     def add_stint(self, setup: dict, lap_times: List[float], session: str = "", track_temp=None, air_temp=None,
                   handling: Optional[dict] = None, fuel_per_lap=None, offtracks: int = 0,
                   recommendations: Optional[List[str]] = None, when: Optional[float] = None,
-                  source: str = "vivo") -> dict:
+                  source: str = "vivo", fuel_start: Optional[float] = None) -> dict:
         laps = sorted(t for t in lap_times if t and t > 0)
         rec = {
             "fecha": time.strftime("%Y-%m-%d %H:%M", time.localtime(when or time.time())),
@@ -128,6 +128,8 @@ class SetupDB:
             "setup": flatten_setup(setup), "medicion": measurements(setup),
             "manejo": handling or {}, "combustible_por_vuelta": fuel_per_lap,
             "salidas_pista": offtracks, "recomendaciones": recommendations or [],
+            "tiempos": [round(float(t), 3) for t in lap_times if t and t > 0],      # en orden, para pruebas A/B
+            "combustible_inicio": None if fuel_start is None else round(float(fuel_start), 2),
         }
         # No duplicar la misma medición (p. ej. reporte en pits + salir del auto)
         if self.stints and rec["medicion"] and self.stints[-1].get("medicion") == rec["medicion"] \

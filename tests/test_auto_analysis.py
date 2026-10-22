@@ -12,6 +12,7 @@ from app.auto_analysis import AutoAnalyzer, spoken_summary  # noqa: E402
 def test_new_session_is_analyzed_once(tmp_path, monkeypatch):
     monkeypatch.setattr("app.telemetry_analyzer.save_tracker", lambda *a, **k: None)
     monkeypatch.setattr("app.telemetry_analyzer.save_references", lambda *a, **k: None)
+    monkeypatch.setattr("app.progress.BASE", str(tmp_path / "progress"))
     folder = tmp_path / "telemetry"
     folder.mkdir()
     channels, yaml_text = synthetic_session()

@@ -14,9 +14,10 @@ from app.telemetry_analyzer import TelemetryAnalyzer, format_report  # noqa: E40
 
 
 @pytest.fixture(autouse=True)
-def no_disk_writes(monkeypatch):
+def no_disk_writes(monkeypatch, tmp_path):
     monkeypatch.setattr("app.telemetry_analyzer.save_tracker", lambda *a, **k: None)
     monkeypatch.setattr("app.telemetry_analyzer.save_references", lambda *a, **k: None)
+    monkeypatch.setattr("app.progress.BASE", str(tmp_path / "progress"))
 
 
 def _write(tmp_path, channels, yaml_text, name="car_track 2026-01-01 10-00-00.ibt"):

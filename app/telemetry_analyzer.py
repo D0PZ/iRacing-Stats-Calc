@@ -6,6 +6,7 @@ compara cada vuelta contra tu mejor, curva por curva.
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -284,10 +285,32 @@ class TelemetryAnalyzer:
         self._limit_recs()
         res.recommendations.sort(key=lambda r: r.priority)
         try:
-            save_references(res.track, res.car, res.track_len, res.corners, res.fuel_per_lap, res.plan_lines)
+            save_references(res.track, res.car, res.track_len, res.corners, res.fuel_per_lap, res.plan_lines,
+                            best_lap=res.best_lap.time if res.best_lap else None)
         except Exception:
             pass
+        try:
+            self._record_progress()
+        except Exception as e:
+            print(f"[progreso] no se pudo guardar: {e}")
         return res
+
+    def _record_progress(self):
+        from app.progress import ProgressDB, session_id_from_path, when_from_path
+        res = self.result
+        valid = [l.time for l in res.laps if l.valid]
+        if not valid or not res.track:
+            return
+        db = ProgressDB(res.track, res.car)
+        when = when_from_path(self.paths[0])
+        # La sesión analizada desde el .ibt reemplaza al resumen en vivo de esa misma sesión (±2 h)
+        t0 = time.mktime(time.strptime(when, "%Y-%m-%d %H:%M"))
+        db.data["sessions"] = [s for s in db.sessions if not (
+            s.get("fuente") == "vivo" and abs(time.mktime(time.strptime(s["fecha"], "%Y-%m-%d %H:%M")) - t0) < 7200)]
+        db.add(session_id_from_path(self.paths[0]), when, res.session_type, valid,
+               ideal=res.theoretical_best if res.theoretical_best else None,
+               offtracks=sum(1 for l in res.laps if l.offtrack), incidents=sum(l.incidents for l in res.laps),
+               balance={b: {"K": g["K"], "n": g["n"]} for b, g in res.gradients.items()}, source="ibt")
 
     def _read_setup(self):
         setup = self.info.get("CarSetup", {}) or {}

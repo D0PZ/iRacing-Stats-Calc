@@ -363,6 +363,11 @@ class LiveEngineer:
         self.muted_until = 0.0
         self.last_spoken = ""
         self.on_track = False
+        self.last_ab_text = ""
+        self.progress = None
+        self.session_stamp = time.strftime("%Y-%m-%d %H:%M")
+        self._rec_check_t = None
+        self._rec_warned = False
         self.tire_model = None
         self.setup_db = None
         self._stint_offs = 0
@@ -789,6 +794,10 @@ class LiveEngineer:
                                         if st.get("offs")}
         if self.refs and self.refs.get("plan"):
             snap["plan_qualy_carrera"] = self.refs["plan"]
+        if self.last_ab_text:
+            snap["ultima_prueba_ab_setup"] = self.last_ab_text
+        if self.progress is not None and self.progress.sessions:
+            snap["progreso_en_esta_pista"] = self.progress.phrases()
         if self.last_lap_inputs:
             snap["inputs_ultima_vuelta"] = self.last_lap_inputs
         if self.best_lap_inputs:
@@ -853,14 +862,47 @@ class LiveEngineer:
         handling["patinaje_s_por_vuelta"] = round(spin, 2)
         handling["por_sentido"] = dict(self.side_counts)
         handling["gradiente"] = self.k_acc.result()
+        fuel_start = (ir["FuelLevel"] or 0.0) + sum(fuel) if fuel else None
         rec = self.setup_db.add_stint(ir["CarSetup"] or {}, stint_laps, session=session,
                                       track_temp=ir["TrackTempCrew"], air_temp=ir["AirTemp"], handling=handling,
                                       fuel_per_lap=round(sum(fuel) / len(fuel), 3) if fuel else None,
-                                      offtracks=self._stint_offs, recommendations=recs)
+                                      offtracks=self._stint_offs, recommendations=recs, fuel_start=fuel_start)
         self._stint_offs = 0
         print(f"[setups] salida guardada ({rec['vueltas']} vueltas, "
               f"{'con' if rec['medicion'] else 'sin'} temperaturas) -> {len(self.setup_db.stints)} en total",
               flush=True)
+        self._report_ab()
+
+    def _record_progress(self):
+        """Resumen de esta sesión para el seguimiento de progreso (se actualiza cada vuelta)"""
+        if self.progress is None:
+            return
+        times = [l["time"] for l in self.my_laps if l["time"] > 0]
+        if not times:
+            return
+        try:
+            kind = str(self.ir["SessionInfo"]["Sessions"][self.ir["SessionNum"]]["SessionType"])
+        except Exception:
+            kind = ""
+        ideal = sum(self.my_best_segs.values()) if len(self.my_best_segs) == N_SEGMENTS else None
+        offs = sum(st.get("offs", 0) for st in self.zone_state.values())
+        self.progress.add(f"vivo {self.session_stamp} {kind}", self.session_stamp, kind, times, ideal=ideal,
+                          offtracks=offs, incidents=int(self.ir["PlayerCarMyIncidentCount"] or 0),
+                          balance=self.k_acc.result(), source="vivo")
+
+    def _report_ab(self) -> Optional[str]:
+        """Prueba A/B: la salida que terminó contra la anterior con otro setup"""
+        from app.ab_test import describe, last_ab
+        from app.vehicle_dynamics import fuel_seconds_per_liter
+        if self.setup_db is None:
+            return None
+        spl = fuel_seconds_per_liter(self.ref_lap())
+        result = last_ab(self.setup_db.stints, spl)
+        if not result:
+            return None
+        self.last_ab_text = describe(result)
+        self.emit(self.last_ab_text, P_INFO, ttl=60)
+        return self.last_ab_text
 
     def _record_cross_point(self):
         """Cada vez que cambias las perch en el garage, aprender cuánto se mueve el cross weight"""
@@ -939,15 +981,34 @@ class LiveEngineer:
             return
         ir = self.ir
         active = ir["IsDiskLoggingActive"]
-        if active is None or not ir["IsDiskLoggingEnabled"]:
-            return  # iRacing con la telemetría de disco desactivada (irsdkEnableDisk=0)
+        enabled = ir["IsDiskLoggingEnabled"]
+        if active is None or enabled is None:
+            if self.on_track and not self._rec_warned:
+                self._rec_warned = True
+                self._rec_log("iRacing no informa el estado de la grabación (variables no disponibles)")
+            return
+        if not enabled:
+            if self.on_track and not self._rec_warned:
+                self._rec_warned = True
+                self._rec_log("la telemetría de disco está desactivada en iRacing (irsdkEnableDisk=0)")
+                self.emit("La grabación de telemetría está desactivada en iRacing.", P_INFO, ttl=10)
+            return
         if self.on_track:
             self._off_track_since = None
             if not active and self._tick_n % 60 == 0:   # reintentar como mucho una vez por segundo
                 ir.telem_command(irsdk.TelemCommandMode.start)
                 if not self._we_record:
                     self._we_record = True
-                    print("[telemetría] grabación iniciada", flush=True)
+                    self._rec_check_t = time.time()
+                    self._rec_log("orden de grabación enviada")
+            if active and self._rec_check_t is not None:
+                self._rec_log("grabación confirmada por iRacing")
+                self._rec_check_t = None
+            elif not active and self._rec_check_t is not None and time.time() - self._rec_check_t > 5 \
+                    and not self._rec_warned:
+                self._rec_warned = True
+                self._rec_log("iRacing no aceptó la orden de grabar en 5 s")
+                self.emit("No pude iniciar la grabación de telemetría: aprieta Alt mas L.", P_INFO, ttl=15)
         else:
             now = time.time()
             if self._off_track_since is None:
@@ -964,6 +1025,14 @@ class LiveEngineer:
                 self.limits_dirty = False
             except OSError as e:
                 print(f"[límites] no se pudieron guardar: {e}", flush=True)
+
+    def _rec_log(self, msg: str):
+        line = f"[{time.strftime('%H:%M:%S')}] [telemetría] {msg}"
+        print(line, flush=True)
+        with self._emit_lock:
+            if self.log_file:
+                self.log_file.write(line + "\n")
+                self.log_file.flush()
 
     # ------------------------------------------------ análisis automático
     def _analysis_done(self, res, report_path: str):
@@ -1066,7 +1135,9 @@ class LiveEngineer:
             if car and car != self.car_name and self.track_name:
                 self.car_name = car
                 from app.setup_db import SetupDB
+                from app.progress import ProgressDB
                 self.setup_db = SetupDB(self.track_name, car)
+                self.progress = ProgressDB(self.track_name, car)
                 print(f"[setups] {len(self.setup_db.stints)} salidas guardadas para {car} en {self.track_name}",
                       flush=True)
                 self.refs = load_references(self.track_name, car, self.track_len)
@@ -1131,6 +1202,7 @@ class LiveEngineer:
             for c in self.cars.values():
                 c.laps.clear()
             self.my_laps = []
+            self.session_stamp = time.strftime("%Y-%m-%d %H:%M")
             self.prev_lap_completed = None
             self.fuel_at_lap_start = None
             self.lap_stats = self._new_lap_stats()
@@ -1539,6 +1611,7 @@ class LiveEngineer:
 
         if not self.corners or len(self.my_laps) % 5 == 0:
             self._detect_corners()
+        self._record_progress()
 
         self._lap_report(st, lap_time, clean, lap_segs)
         self._battle_report()
@@ -2160,6 +2233,14 @@ class LiveEngineer:
                 return "Esta sesión te pasaste: " + ", ".join(hot) + ". Deja medio metro de margen ahí."
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
+
+        if has("sirvio", "funciono", "prueba", "a b", "comparacion", "el cambio", "mejoro"):
+            return self.last_ab_text or self._report_ab() or (
+                "Todavía no hay una prueba: necesito una salida con un setup y otra con un cambio, de 2 vueltas o más.")
+
+        if has("progreso", "progresando", "mejorando", "historial", "evolucion", "record"):
+            phrases = self.progress.phrases() if self.progress is not None else []
+            return " ".join(phrases) if phrases else "Todavía no tengo sesiones guardadas en esta pista con este auto."
 
         if has("pedal", "pedales", "volante", "input", "como freno", "como acelero", "manejo"):
             lap, best = self.last_lap_inputs, self.best_lap_inputs

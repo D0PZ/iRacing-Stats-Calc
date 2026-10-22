@@ -15,6 +15,7 @@ from app.projections import ProjectionEngine
 from app.charts import ChartGenerator
 from app.ml_engine import MLEngine, SKLEARN_AVAILABLE
 from app.telemetry_view import TelemetryView, LiveEngineerView
+from app.progress_view import ProgressView
 
 
 class IracingStatsApp:
@@ -67,6 +68,7 @@ class IracingStatsApp:
         # Telemetría (.ibt) e ingeniero en vivo: no dependen del JSON
         self.telemetry_view = TelemetryView(self)
         self.live_view = LiveEngineerView(self)
+        self.progress_view = ProgressView(self)
         
         # Construir interfaz
         self.build_ui()
@@ -301,6 +303,7 @@ class IracingStatsApp:
             ("📊  Gráficos", self.show_charts),
             ("🔧  Telemetría y Setup", self.show_telemetry),
             ("🎙️  Ingeniero en Vivo", self.show_live_engineer),
+            ("📈  Progreso y A/B", self.show_progress),
         ]
         
         for text, command in nav_items:
@@ -1059,6 +1062,10 @@ class IracingStatsApp:
     def show_telemetry(self):
         """Análisis de telemetría .ibt con recomendaciones de setup y pilotaje"""
         self.telemetry_view.show()
+
+    def show_progress(self):
+        """Evolución por pista/auto y pruebas A/B de setup"""
+        self.progress_view.show()
 
     def show_live_engineer(self):
         """Ingeniero de carrera por voz en tiempo real"""

@@ -35,6 +35,7 @@ def test_analyzer_laps_corners_fuel(ibt_path, monkeypatch, tmp_path):
     # No escribir el mapa de límites en data/ del repo durante la prueba
     monkeypatch.setattr("app.telemetry_analyzer.save_tracker", lambda *a, **k: None)
     monkeypatch.setattr("app.telemetry_analyzer.save_references", lambda *a, **k: None)
+    monkeypatch.setattr("app.progress.BASE", str(tmp_path / "progress"))
     res = TelemetryAnalyzer([ibt_path]).analyze()
     assert res.track == "Test Ring"
     assert len(res.laps) == 4

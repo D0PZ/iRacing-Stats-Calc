@@ -20,12 +20,21 @@ def path_for(track: str, car: str) -> str:
 
 
 def save_references(track: str, car: str, track_len: float, corners,
-                    fuel_per_lap: float = 0.0, plan: Optional[list] = None) -> Optional[str]:
-    """corners: CornerResult del analizador; fuel_per_lap: consumo medido (L/vuelta)"""
+                    fuel_per_lap: float = 0.0, plan: Optional[list] = None,
+                    best_lap: Optional[float] = None) -> Optional[str]:
+    """
+    corners: CornerResult del analizador; fuel_per_lap: consumo medido (L/vuelta).
+    Solo reemplaza las referencias guardadas si esta sesión es al menos tan rápida (no empeorar las
+    referencias analizando una sesión más lenta, p. ej. una qualy corta).
+    """
     if not corners:
+        return None
+    existing = load_references(track, car, track_len)
+    if existing and best_lap and existing.get("mejor_vuelta") and best_lap > existing["mejor_vuelta"] + 0.05:
         return None
     os.makedirs(BASE, exist_ok=True)
     data = {"track": track, "car": car, "track_len": track_len,
+            "mejor_vuelta": round(best_lap, 3) if best_lap else None,
             "fuel_per_lap": round(fuel_per_lap, 3) if fuel_per_lap else None, "plan": plan or [], "corners": [
         {"n": c.number, "apex_m": c.apex_m, "brake_at_m": c.brake_at_m, "brake_m_before": c.brake_m_best,
          "brake_peak": c.brake_peak_best, "min_kmh": c.min_speed_best, "gear": c.gear,
