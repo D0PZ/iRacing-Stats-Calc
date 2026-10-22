@@ -668,6 +668,10 @@ class LiveEngineer:
         ir = self.ir
         self._refresh_session_info()
         if self.me < 0:
+            # Sin auto propio (espectador, cargando): no dejar preguntas sin respuesta
+            while not self.questions.empty():
+                self.questions.get()
+                self.emit("Todavía no estás en un auto, no tengo tus datos.", P_BATTLE + 5, ttl=10, always=True)
             return
         t = ir["SessionTime"] or 0.0
         if self._last_t is not None and 0 < t - self._last_t < 0.25:

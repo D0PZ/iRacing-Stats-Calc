@@ -257,3 +257,11 @@ def test_learned_limits_saved_on_disconnect(eng, monkeypatch):
     eng.ir.shutdown = lambda: None
     eng._check_connection()
     assert saved == ["Pista de Prueba"]
+
+
+def test_question_without_own_car_gets_an_answer(eng):
+    eng.ir.v["DriverInfo"] = dict(eng.ir.v["DriverInfo"], DriverCarIdx=-1)
+    eng.session_info_tick = -2
+    eng.ask("¿cuánto combustible me queda?")
+    tick(eng)
+    assert "no estás en un auto" in texts(eng)[-1]
