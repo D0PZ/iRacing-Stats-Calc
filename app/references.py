@@ -31,7 +31,7 @@ def save_references(track: str, car: str, track_len: float, corners,
          "brake_peak": c.brake_peak_best, "min_kmh": c.min_speed_best, "gear": c.gear,
          "throttle_m": c.throttle_m_best, "kind": c.kind,
          "frenar_mas_tarde_m": getattr(c, "brake_potential_m", 0.0), "ganancia_s": getattr(c, "brake_gain_s", 0.0),
-         "agarre_usado": getattr(c, "grip_usage", None)}
+         "agarre_usado": getattr(c, "grip_usage", None), "inputs": list(getattr(c, "inputs_tips", []))}
         for c in corners]}
     path = path_for(track, car)
     with open(path, "w", encoding="utf-8") as f:

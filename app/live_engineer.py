@@ -420,7 +420,11 @@ class LiveEngineer:
         self.session_handling: Dict[str, List[float]] = defaultdict(list)
         self.side_counts: Dict[str, int] = {}
         from app.vehicle_dynamics import GradientAccumulator
+        from app.driver_inputs import InputTracker
         self.k_acc = GradientAccumulator()
+        self.inputs = InputTracker()            # pedales y volante de la vuelta en curso
+        self.best_lap_inputs: Optional[dict] = None
+        self.last_lap_inputs: Optional[dict] = None
         self.laps_since_setup = 0
         self.prev_in_stall = False
         # Tiempo real
@@ -785,7 +789,14 @@ class LiveEngineer:
                                         if st.get("offs")}
         if self.refs and self.refs.get("plan"):
             snap["plan_qualy_carrera"] = self.refs["plan"]
+        if self.last_lap_inputs:
+            snap["inputs_ultima_vuelta"] = self.last_lap_inputs
+        if self.best_lap_inputs:
+            snap["inputs_mejor_vuelta"] = self.best_lap_inputs
         if self.refs and self.refs.get("corners"):
+            tips = {f"curva {c['n']}": c["inputs"] for c in self.refs["corners"] if c.get("inputs")}
+            if tips:
+                snap["inputs_por_curva_vs_tu_mejor_paso"] = tips
             pot = [{"curva": c["n"], "frenar_mas_tarde_m": c["frenar_mas_tarde_m"], "ganancia_s": c["ganancia_s"],
                     "agarre_usado": c.get("agarre_usado")}
                    for c in self.refs["corners"] if (c.get("ganancia_s") or 0) >= 0.05]
@@ -1386,6 +1397,9 @@ class LiveEngineer:
         self._record_profile(pct, v)
         if not ir["OnPitRoad"] and ir["PlayerTrackSurface"] == 3:
             self.k_acc.add(v, steer, yaw, ir["LatAccel"] or 0.0, ir["LongAccel"] or 0.0)
+        raw_t, raw_b = ir["ThrottleRaw"], ir["BrakeRaw"]
+        self.inputs.add(dt, thr if raw_t is None else raw_t, brk if raw_b is None else raw_b,
+                        math.degrees(steer), (ir["LatAccel"] or 0.0) / 9.81, v)
         if brk > 0.1 and not self._brake_on and v > 20:
             self._brake_on = True
             dist = ir["LapDist"]
@@ -1502,6 +1516,14 @@ class LiveEngineer:
         self.lap_stats = self._new_lap_stats()
         lap_segs, self.my_lap_segs = self.my_lap_segs, {}
         self._close_lap_trace(lap_time, clean)
+        lap_inputs = self.inputs.result()
+        self.inputs.reset()
+        self.last_lap_inputs = lap_inputs if lap_inputs["duracion_s"] > 30 else None
+        prev_clean = [l["time"] for l in self.my_laps if l["time"] > 0]
+        if clean and self.last_lap_inputs and (not prev_clean or lap_time < min(prev_clean)):
+            self.best_lap_inputs = dict(self.last_lap_inputs)
+        elif self.last_lap_inputs and self.best_lap_inputs and clean:
+            self._input_coaching(self.last_lap_inputs, self.best_lap_inputs)
         brakes, self.lap_brakes = self.lap_brakes, []
         self.last_lap_brakes = self._brakes_by_corner(brakes)
         prev_clean = [l["time"] for l in self.my_laps[:-1] if l["time"] > 0]
@@ -1522,6 +1544,24 @@ class LiveEngineer:
         self._battle_report()
         self._fuel_report(fuel)
         self._laps_countdown()
+
+    def _input_coaching(self, lap: dict, best: dict):
+        """Una observación por vuelta (como mucho cada 3 vueltas) cuando tus inputs se alejan de tu mejor vuelta"""
+        tips = []
+        if lap["inercia_s"] - best["inercia_s"] > 1.5:
+            tips.append(f"Esa vuelta fuiste {lap['inercia_s'] - best['inercia_s']:.1f} segundos más sin pedales que en tu "
+                        f"mejor vuelta: une el freno con el acelerador.")
+        if lap["correcciones"] - best["correcciones"] >= 8:
+            tips.append(f"Corregiste el volante {lap['correcciones']} veces, {lap['correcciones'] - best['correcciones']} más "
+                        f"que en tu mejor vuelta: entradas más limpias, un solo movimiento.")
+        if lap["levantadas"] - best["levantadas"] >= 6:
+            tips.append("Estás levantando mucho el acelerador en las salidas: aplica una vez y progresivo.")
+        if lap["acelera_agregando_volante_s"] - best["acelera_agregando_volante_s"] > 0.8:
+            tips.append("Pisas el acelerador mientras todavía agregas volante: primero endereza, después acelera.")
+        if lap.get("ataque_freno_s") and best.get("ataque_freno_s") and lap["ataque_freno_s"] - best["ataque_freno_s"] > 0.12:
+            tips.append("Estás atacando el freno más lento que en tu mejor vuelta: pisa más decidido al inicio.")
+        if tips:
+            self.emit(tips[0], P_INFO, key="inputs", cooldown=self.ref_lap() * 3, ttl=12)
 
     def _most_common_zone(self, pcts: List[float]) -> str:
         if not pcts:
@@ -2000,6 +2040,8 @@ class LiveEngineer:
             if c.get("throttle_m") is not None:
                 parts.append(f"y a fondo {c['throttle_m']:.0f} metros después del vértice")
             msg = ", ".join(parts) + "."
+            if c.get("inputs"):
+                msg += " En tu mejor paso: " + c["inputs"][0] + "."
             if (c.get("frenar_mas_tarde_m") or 0) >= 4 and (c.get("ganancia_s") or 0) >= 0.03:
                 msg += (f" Según el cálculo físico puedes frenar unos {c['frenar_mas_tarde_m']:.0f} metros más tarde y "
                         f"soltar progresivo: hasta {c['ganancia_s']:.2f} segundos.")
@@ -2118,6 +2160,21 @@ class LiveEngineer:
                 return "Esta sesión te pasaste: " + ", ".join(hot) + ". Deja medio metro de margen ahí."
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
+
+        if has("pedal", "pedales", "volante", "input", "como freno", "como acelero", "manejo"):
+            lap, best = self.last_lap_inputs, self.best_lap_inputs
+            if not lap:
+                return "Necesito una vuelta completa para analizar tus pedales y volante."
+            msg = (f"Última vuelta: {lap['inercia_s']:.1f} segundos sin pedales, {lap['a_fondo_pct']:.0f} por ciento a "
+                   f"fondo, {lap['levantadas']} levantadas de acelerador y {lap['correcciones']} correcciones de volante.")
+            if best and best is not lap:
+                diffs = []
+                if lap["inercia_s"] - best["inercia_s"] > 0.8:
+                    diffs.append(f"{lap['inercia_s'] - best['inercia_s']:.1f} segundos más de inercia")
+                if lap["correcciones"] - best["correcciones"] >= 4:
+                    diffs.append(f"{lap['correcciones'] - best['correcciones']} correcciones más")
+                msg += (" Contra tu mejor vuelta: " + " y ".join(diffs) + ".") if diffs else " Igual que en tu mejor vuelta."
+            return msg
 
         if has("barra", "arb", "estabilizadora", "aleron", "wing", "perch", "cross", "altura", "rake"):
             recs = self._chassis_recs()

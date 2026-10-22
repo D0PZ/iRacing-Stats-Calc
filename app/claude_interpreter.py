@@ -52,6 +52,10 @@ Reglas:
 - balance_gradiente_subviraje: K en grados por g medido en esta salida por velocidad de curva (lenta < 100,
   media, rapida > 160 km/h). K > 0 subviraje, K < 0 sobreviraje. Objetivo +0.2 en lentas (barras) y +0.4 en
   rápidas (alerón). Barra delantera más dura sube K, trasera más dura lo baja, más alerón sube K en rápidas.
+- Inputs (pedal crudo, sin ayudas): inercia_s = sin pedales, ambos_pedales_s, a_fondo_pct, levantadas de
+  acelerador, correcciones de volante dentro de una curva, ataque_freno_s (hasta la presión máxima), liberacion_s
+  (trail braking), acelera_agregando_volante_s. Compara la última vuelta con la mejor; por curva, usa
+  inputs_por_curva_vs_tu_mejor_paso.
 - Chasis: usa ajustes_chasis_recomendados si vienen. Barras = balance en curvas lentas/medias; alerón = balance
   en curvas rápidas y velocidad punta; spring perch = cross weight (simetría izquierda/derecha) y rake.
 - eventos_por_sentido_y_velocidad cuenta derrapes y subviraje por sentido (izq/der) y por velocidad de curva

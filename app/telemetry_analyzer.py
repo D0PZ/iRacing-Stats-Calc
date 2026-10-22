@@ -73,6 +73,10 @@ class CornerResult:
     brake_potential_m: float = 0.0            # metros que podrías frenar más tarde (al 90 % de eficiencia)
     brake_gain_s: float = 0.0
     grip_usage: Optional[float] = None         # uso medio del agarre demostrado a esa velocidad
+    window_m: tuple = (0.0, 0.0)               # tramo de la curva en metros de vuelta
+    inputs_best: Dict[str, float] = field(default_factory=dict)      # pedales/volante en tu mejor paso
+    inputs_typical: Dict[str, float] = field(default_factory=dict)   # mediana de tus pasos
+    inputs_tips: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +96,7 @@ class AnalysisResult:
     setup: Dict[str, str] = field(default_factory=dict)
     limit_zones: List[dict] = field(default_factory=list)
     gradients: Dict[str, dict] = field(default_factory=dict)   # K por banda de velocidad
+    inputs_laps: Dict[int, dict] = field(default_factory=dict)  # métricas de inputs por vuelta
     plan_lines: List[str] = field(default_factory=list)       # plan de qualy y carrera
     pad_plan: Optional[dict] = None
     brake_profile: Optional[dict] = None
@@ -259,6 +264,10 @@ class TelemetryAnalyzer:
             self._physics(data, grid, step, apexes, valid)
         except Exception as e:
             print(f"[física] no se pudo calcular: {e}")
+        try:
+            self._inputs(valid)
+        except Exception as e:
+            print(f"[inputs] no se pudo calcular: {e}")
         self._tires(valid)
         try:
             self._track_limits(valid)
@@ -327,7 +336,8 @@ class TelemetryAnalyzer:
         for k, (apex, (s, e)) in enumerate(zip(apexes, bounds)):
             idx = np.arange(s, e) % n
             apex_rel = apex - s
-            cr = CornerResult(number=k + 1, apex_m=float(grid[apex]))
+            cr = CornerResult(number=k + 1, apex_m=float(grid[apex]),
+                              window_m=(float(grid[s % n]), float(grid[(e - 1) % n])))
             times, mins, exits, brakes, peaks, fulls = {}, {}, {}, {}, {}, {}
             under, over, spin, lock, absr, coast, gears = [], [], [], [], [], [], []
             for num, d in data.items():
@@ -492,6 +502,58 @@ class TelemetryAnalyzer:
                     f"Gradiente de subviraje K = {g['K']:+.2f} grados por g (objetivo {TARGET_K[band]:+.1f}); se corrige "
                     f"con {tool}. Pregúntale a la ingeniera por los clics exactos: los calcula con lo que aprende de "
                     f"tus salidas."))
+
+    # ------------------------------------------------- inputs del piloto
+    def _inputs(self, valid: List[Lap]):
+        """Pedales y volante por vuelta y por curva; compara tu mejor paso por cada curva con lo típico"""
+        from app import driver_inputs as di
+        res = self.result
+        chans = ("ThrottleRaw", "BrakeRaw", "SteeringWheelAngle", "LatAccel", "Speed", "LapDist")
+        per_corner = {c.number: {} for c in res.corners}
+        for l in valid:
+            f = self.files[l.file_idx]
+            if any(f.get(ch) is None for ch in chans):
+                return
+            sl = slice(l.i0, l.i1)
+            thr, brk, st, ay, v, dist = (f.get(ch)[sl] for ch in chans)
+            res.inputs_laps[l.number] = di.run(thr, brk, st, ay, v)
+            for c in res.corners:
+                a, b = c.window_m
+                m = (dist >= a) & (dist <= b) if a < b else (dist >= a) | (dist <= b)
+                if m.sum() > 20:
+                    per_corner[c.number][l.number] = di.run(thr[m], brk[m], st[m], ay[m], v[m])
+        for c in res.corners:
+            laps = per_corner.get(c.number) or {}
+            if c.best_time_lap not in laps or len(laps) < 3:
+                continue
+            c.inputs_best = laps[c.best_time_lap]
+            keys = set().union(*(d.keys() for d in laps.values()))
+            c.inputs_typical = {k: float(np.median([d[k] for d in laps.values() if k in d])) for k in keys}
+            c.inputs_tips = di.compare(c.inputs_best, c.inputs_typical)
+        self._input_recs()
+
+    def _input_recs(self):
+        res = self.result
+        R = res.recommendations
+        if res.inputs_laps:
+            laps = list(res.inputs_laps.values())
+            med = lambda k: float(np.median([x[k] for x in laps if k in x]))      # noqa: E731
+            parts = [f"{med('inercia_s'):.1f} s sin pedales", f"{med('ambos_pedales_s'):.1f} s con los dos pedales",
+                     f"{med('a_fondo_pct'):.0f} % a fondo", f"{med('levantadas'):.0f} levantadas de acelerador",
+                     f"{med('correcciones'):.0f} correcciones de volante"]
+            if any("ataque_freno_s" in x for x in laps):
+                parts.append(f"ataque de freno {med('ataque_freno_s'):.2f} s y liberación {med('liberacion_s'):.2f} s")
+            R.append(Recommendation("Inputs", 3, "Tus pedales y volante por vuelta (mediana)", ", ".join(parts) + "."))
+        tips = [(c, t) for c in res.corners for t in c.inputs_tips]
+        by_corner = {}
+        for c, t in tips:
+            by_corner.setdefault(c.number, (c, []))[1].append(t)
+        ranked = sorted(by_corner.values(), key=lambda x: -x[0].time_loss_avg)[:4]
+        for c, ts in ranked:
+            R.append(Recommendation(
+                "Inputs", 1 if c.time_loss_avg > 0.15 else 2,
+                f"Curva {c.number}: copia tu mejor paso (pierdes {c.time_loss_avg:.2f} s de media)",
+                "; ".join(ts).capitalize() + "."))
 
     # ---------------------------------------------------- límites de pista
     def _corner_name(self, s: float) -> str:
@@ -922,6 +984,18 @@ def format_report(res: AnalysisResult) -> str:
                     if c.brake_efficiency else "sin frenada"
                 gu = f"agarre usado {c.grip_usage * 100:.0f} %" if c.grip_usage == c.grip_usage else ""
                 lines.append(f"  C{c.number:<2} {be}  {gu}")
+        lines.append("")
+    if res.inputs_laps:
+        lines.append("INPUTS POR VUELTA (pedal crudo, sin ayudas)")
+        for n, x in sorted(res.inputs_laps.items()):
+            lines.append(f"  V{n:<3} inercia {x['inercia_s']:5.1f}s  dos pedales {x['ambos_pedales_s']:4.1f}s  "
+                         f"a fondo {x['a_fondo_pct']:4.0f}%  ataque freno {x.get('ataque_freno_s', 0):.2f}s  "
+                         f"liberación {x.get('liberacion_s', 0):.2f}s  levantadas {x['levantadas']:3d}  "
+                         f"correcciones {x['correcciones']:3d}  acelera girando {x['acelera_agregando_volante_s']:.1f}s")
+        tips = [(c.number, t) for c in res.corners for t in c.inputs_tips]
+        if tips:
+            lines.append("  Qué hace distinto tu mejor paso por cada curva:")
+            lines += [f"    C{n}: {t}" for n, t in tips]
         lines.append("")
     if res.plan_lines:
         lines.append("PLAN QUALY / CARRERA")
