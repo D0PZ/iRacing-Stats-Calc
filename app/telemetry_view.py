@@ -340,6 +340,15 @@ class LiveEngineerView:
         menu = tk.OptionMenu(conf, self.voice_var, *VOICES, command=self._save_voice)
         menu.config(bg=c['bg_secondary'], fg=c['text_primary'], relief=tk.FLAT, highlightthickness=0)
         menu.grid(row=0, column=1, sticky=tk.W, padx=8)
+        from app.live_engineer import list_output_devices
+        devices = list_output_devices() or ["(predeterminada de Windows)"]
+        current = (cfg.get("audio_output") or [None])[0]
+        tk.Label(conf, text="Salida de audio:", bg=c['bg_card'], fg=c['text_secondary'],
+                 font=('Segoe UI', 10)).grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        self.output_var = tk.StringVar(value=current if current in devices else devices[0])
+        out_menu = tk.OptionMenu(conf, self.output_var, *devices, command=self._save_output)
+        out_menu.config(bg=c['bg_secondary'], fg=c['text_primary'], relief=tk.FLAT, highlightthickness=0)
+        out_menu.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=8, pady=(8, 0))
         btn_ptt = cfg.get("ptt_button")
         ptt_text = (f"botón {btn_ptt} de {cfg.get('ptt_joystick')}" if btn_ptt is not None else "sin botón asignado") + \
             f"  •  tecla {str(cfg.get('ptt_key', 'insert')).upper()}"
@@ -390,6 +399,12 @@ class LiveEngineerView:
         self.thread = threading.Thread(target=self.engineer.run, daemon=True)
         self.thread.start()
         self.show()
+
+    def _save_output(self, value):
+        from app.voice_commands import load_config, save_config
+        cfg = load_config()
+        cfg["audio_output"] = [value]
+        save_config(cfg)
 
     def _save_voice(self, value):
         from app.voice_commands import load_config, save_config

@@ -133,6 +133,17 @@ URGENT_RATE = "+30%"     # llamadas urgentes: más rápidas
 DEFAULT_OUTPUTS = ["Auriculares", "Realtek(R) Audio"]
 
 
+def list_output_devices() -> List[str]:
+    try:
+        import pygame
+        import pygame._sdl2.audio as sdl_audio
+        if not pygame.get_init():
+            pygame.init()
+        return list(sdl_audio.get_audio_device_names(False))
+    except Exception:
+        return []
+
+
 def pick_output_device(preferences: Optional[List[str]] = None) -> Optional[str]:
     """Primer dispositivo de salida cuyo nombre contiene alguna preferencia (en orden); None = el de Windows"""
     try:
@@ -2404,6 +2415,8 @@ def main():
     parser.add_argument("--voz", default=None,
                         help="Voz neuronal (ej: es-AR-TomasNeural, es-MX-JorgeNeural, es-CL-CatalinaNeural)")
     parser.add_argument("--voz-windows", action="store_true", help="Usar la voz clásica de Windows (sin internet)")
+    parser.add_argument("--elegir-salida", action="store_true",
+                        help="Elegir el dispositivo de audio por donde habla la ingeniera (audífonos)")
     parser.add_argument("--asignar-boton", action="store_true",
                         help="Aprieta el botón del volante que quieres usar para hablarle al ingeniero")
     parser.add_argument("--tecla", default=None, help="Tecla push-to-talk alternativa (por defecto Insert)")
@@ -2420,6 +2433,28 @@ def main():
     log_path = os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt"))
     from app.voice_commands import PushToTalk, load_config, save_config, wait_for_button
     cfg = load_config()
+    if args.elegir_salida:
+        devices = list_output_devices()
+        if not devices:
+            print("No encontré salidas de audio.")
+            return
+        print("Salidas de audio:")
+        for i, name in enumerate(devices, 1):
+            mark = "  <- actual" if name in (cfg.get("audio_output") or []) else ""
+            print(f"  {i}. {name}{mark}")
+        choice = input("Escribe el número de la salida para la radio y presiona Enter: ").strip()
+        if not choice.isdigit() or not 1 <= int(choice) <= len(devices):
+            print("Número inválido, no cambié nada.")
+            return
+        name = devices[int(choice) - 1]
+        cfg["audio_output"] = [name]
+        save_config(cfg)
+        print(f"Listo: la radio va a salir por '{name}'. Escucha la prueba...")
+        test = Voice(neural_voice=cfg.get("voice") or DEFAULT_NEURAL_VOICE, outputs=[name])
+        test.say("Prueba de radio. Si me escuchas aquí, la salida quedó bien.", P_INFO, ttl=20)
+        time.sleep(6)
+        test.stop()
+        return
     if args.asignar_boton:
         print("Aprieta el botón del volante que quieres usar para hablar (15 s)...", flush=True)
         found = wait_for_button()
