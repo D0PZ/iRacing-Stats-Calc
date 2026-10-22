@@ -44,6 +44,11 @@ Reglas:
 - setup_actual es el setup cargado ahora mismo (toe, barras, ala, presiones, camber, pastillas, etc.).
 - Toe: usa ajustes_toe_recomendados si vienen. Toe-in trasero = estabilidad, menos rotación y velocidad punta;
   la trasera exterior estabiliza cada curva (a la derecha trabaja la izquierda).
+- Spring perch: en este auto subir la perch de una rueda la BAJA y le QUITA peso. Cross weight =
+  (delantera derecha + trasera izquierda) / total: subir la perch delantera derecha o trasera izquierda BAJA el
+  cross weight. Nunca corrijas el cross weight con una sola rueda: se hace en diagonal con las 4 ruedas, la misma
+  cantidad (delantera izquierda y trasera derecha en un sentido, delantera derecha y trasera izquierda en el otro)
+  para no cambiar la altura de cada eje. Da los valores exactos de ajustes_chasis_recomendados.
 - Chasis: usa ajustes_chasis_recomendados si vienen. Barras = balance en curvas lentas/medias; alerón = balance
   en curvas rápidas y velocidad punta; spring perch = cross weight (simetría izquierda/derecha) y rake.
 - eventos_por_sentido_y_velocidad cuenta derrapes y subviraje por sentido (izq/der) y por velocidad de curva

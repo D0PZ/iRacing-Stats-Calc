@@ -42,14 +42,30 @@ def test_stable_fast_corners_trims_wing_for_top_speed():
     assert ("Alerón", 9) in _params(advise(SETUP, 4, {}))
 
 
-def test_cross_weight_toward_50_when_not_needed():
+def test_cross_weight_corrected_in_diagonal_with_four_wheels():
     recs = advise(SETUP, 4, {})
     cross = [r for r in recs if r["param"] == "Cross weight"][0]
-    assert cross["a"] == 50.0 and "delantera derecha o la trasera izquierda" in cross["por"]
+    perch = cross["plan"]["perch"]
+    # Subir cross: menos perch en delantera derecha y trasera izquierda, más en las otras dos, misma cantidad
+    assert perch["RF"] < 0.0 and perch["LR"] < 3.0 and perch["LF"] > 0.0 and perch["RR"] > -0.5
+    d = cross["plan"]["mm"]
+    assert perch == {"LF": d, "RF": -d, "LR": 3.0 - d, "RR": -0.5 + d}
+    # La altura media de cada eje no cambia
+    assert perch["LF"] + perch["RF"] == 0.0 and perch["LR"] + perch["RR"] == 2.5
+    assert abs(cross["a"] - 50.0) < 0.4
+
+
+def test_learns_sensitivity_from_driver_tests():
+    from app.chassis_advisor import learn_cross_sens
+    # Pruebas reales en COTA: delantera derecha 0 / 15 / 4.25 mm -> 48.4 / 40.0 / 46.1 %
+    pts = [{"perch": {"LF": 0, "RF": rf, "LR": 3.0, "RR": -0.5}, "cross": c}
+           for rf, c in ((0, 48.4), (15, 40.0), (4.25, 46.1))]
+    sens = learn_cross_sens(pts)
+    assert abs(sens["front"] - 0.56) < 0.03
 
 
 def test_cross_weight_follows_direction_balance():
     recs = advise(SETUP, 4, {"mid_under_izq": 6})            # subvira más a la izquierda -> bajar cross
     cross = [r for r in recs if r["param"] == "Cross weight"][0]
     assert cross["a"] < 48.4
-    assert all("por ciento" in p or "Cross" not in p for p in phrases(recs))
+    assert "diagonal" in phrases(recs)[[r["param"] for r in recs].index("Cross weight")]

@@ -8,9 +8,13 @@ Qué ajuste corrige qué, según DÓNDE aparece el problema:
   992 Cup: barra delantera 1 (blanda) ... 6 (dura) y 7 algo más blanda que 6 -> orden real 1-2-3-4-5-7-6.
 - Alerón (aerodinámico, curvas rápidas > 160 km/h):
   sobreviraje rápido -> +1; subviraje rápido -> -1; estable en lo rápido -> -1 para velocidad punta.
-- Spring perch:
-  cross weight a 50 %: más cross weight = subvira en curvas a la izquierda y se suelta en las de la derecha;
-  rake: subir ambas traseras = más apoyo delantero (ayuda al subviraje rápido) y al revés.
+- Spring perch (en este auto, MÁS perch = esa esquina más baja y con MENOS peso; medido en COTA:
+  delantera derecha de 0 a 15 mm bajó el cross weight de 48.4 a 40 %, unos 0.55 % por mm):
+  cross weight = (delantera derecha + trasera izquierda) / total. Se corrige en DIAGONAL con las 4 ruedas
+  (delantera izquierda y trasera derecha en un sentido, delantera derecha y trasera izquierda en el otro,
+  misma cantidad) para no cambiar la altura media de cada eje ni el rake.
+  Más cross weight = subvira en curvas a la izquierda y se suelta en las de la derecha.
+  Rake: bajar la perch de ambas traseras sube la cola = más apoyo delantero en curvas rápidas.
 """
 
 import re
@@ -19,7 +23,48 @@ from typing import Dict, List, Optional
 EVENT_RATE = 0.8          # eventos por vuelta para considerar que hay una tendencia
 FRONT_ARB_ORDER = [1, 2, 3, 4, 5, 7, 6]     # 992 Cup: de más blanda a más dura
 REAR_ARB_RANGE = (0, 6)
-PERCH_STEP = 0.5          # mm
+PERCH_STEP = 0.25         # mm (paso del garage)
+CROSS_SENS = 0.55         # % de cross weight por mm de perch por esquina (medido en el 992 Cup, se aprende)
+
+
+def learn_cross_sens(points: List[dict]) -> Dict[str, float]:
+    """
+    points: [{'perch': {'LF':..,'RF':..,'LR':..,'RR':..}, 'cross': 48.4}, ...] vistos en el garage.
+    Modelo: cross = c0 + kf * (LF - RF) + kr * (RR - LR). Devuelve {'front': kf, 'rear': kr}.
+    """
+    import numpy as np
+    rows = [p for p in points if p.get("cross") is not None and all(w in p["perch"] for w in ("LF", "RF", "LR", "RR"))]
+    sens = {"front": CROSS_SENS, "rear": CROSS_SENS}
+    if len(rows) < 2:
+        return sens
+    xf = np.array([p["perch"]["LF"] - p["perch"]["RF"] for p in rows])
+    xr = np.array([p["perch"]["RR"] - p["perch"]["LR"] for p in rows])
+    y = np.array([p["cross"] for p in rows])
+    if np.ptp(xf) > 0.2 and np.ptp(xr) > 0.2 and len(rows) >= 3:
+        A = np.column_stack([np.ones(len(y)), xf, xr])
+        _, kf, kr = np.linalg.lstsq(A, y, rcond=None)[0]
+        if 0.1 < kf < 2 and 0.1 < kr < 2:
+            return {"front": round(float(kf), 3), "rear": round(float(kr), 3)}
+    for key, x in (("front", xf), ("rear", xr)):
+        if np.ptp(x) > 0.2:
+            k = float(np.polyfit(x, y, 1)[0])
+            if 0.1 < k < 2:
+                sens[key] = round(k, 3)
+                other = "rear" if key == "front" else "front"
+                if np.ptp(xr if key == "front" else xf) <= 0.2:
+                    sens[other] = sens[key]   # sin datos del otro eje: misma sensibilidad
+    return sens
+
+
+def cross_plan(perch: Dict[str, float], cross: float, target: float, sens: Optional[Dict[str, float]] = None) -> dict:
+    """Movimiento en diagonal (misma cantidad en las 4 ruedas) para llevar el cross weight al objetivo"""
+    sens = sens or {"front": CROSS_SENS, "rear": CROSS_SENS}
+    k = 2 * sens["front"] + 2 * sens["rear"]          # % por mm moviendo las cuatro esquinas
+    d = (target - cross) / k
+    d = round(d / PERCH_STEP) * PERCH_STEP
+    new = {"LF": perch["LF"] + d, "RR": perch["RR"] + d, "RF": perch["RF"] - d, "LR": perch["LR"] - d}
+    predicted = cross + d * k
+    return {"mm": d, "perch": {w: round(v, 2) for w, v in new.items()}, "cross_previsto": round(predicted, 1)}
 
 
 def _num(text) -> Optional[float]:
@@ -62,7 +107,7 @@ def _stiffer_front(cur: int) -> Optional[int]:
 
 
 def advise(flat: Dict[str, str], laps: int, counts: Dict[str, int],
-           history: Optional[List[dict]] = None) -> List[dict]:
+           history: Optional[List[dict]] = None, cross_sens: Optional[Dict[str, float]] = None) -> List[dict]:
     """
     counts: eventos de la salida por velocidad y sentido, p. ej.
       {'mid_under_lenta': 4, 'exit_slides_media': 3, 'entry_slides_rapida': 1, 'mid_under_izq': 2, ...}
@@ -117,32 +162,33 @@ def advise(flat: Dict[str, str], laps: int, counts: Dict[str, int],
     under_r = r("mid_under_der") + r("entry_under_der")
     over_l = r("entry_slides_izq") + r("exit_slides_izq")
     over_r = r("entry_slides_der") + r("exit_slides_der")
-    if cross is not None:
+    perch = c.get("perch", {})
+    if cross is not None and all(w in perch for w in ("LF", "RF", "LR", "RR")):
         # Solo con una diferencia clara y suficientes vueltas (si no, el consejo salta de una salida a otra)
         enough = laps >= 3
         tighter_left = enough and under_l - over_l > under_r - over_r + 1.0    # subvira más a la izquierda
         tighter_right = enough and under_r - over_r > under_l - over_l + 1.0
+        target, why = None, ""
         if tighter_left:
-            recs.append({"param": "Cross weight", "de": cross, "a": round(min(cross, 50.0) - 0.5, 1),
-                         "por": "subviras más en curvas a la izquierda: baja el cross weight subiendo la perch "
-                                f"delantera izquierda o la trasera derecha de a {PERCH_STEP} milímetros"})
+            target, why = round(min(cross, 50.0) - 0.5, 1), "subviras más en curvas a la izquierda: menos cross weight"
         elif tighter_right:
-            recs.append({"param": "Cross weight", "de": cross, "a": round(max(cross, 50.0) + 0.5, 1),
-                         "por": "subviras más en curvas a la derecha: sube el cross weight subiendo la perch "
-                                f"delantera derecha o la trasera izquierda de a {PERCH_STEP} milímetros"})
+            target, why = round(max(cross, 50.0) + 0.5, 1), "subviras más en curvas a la derecha: más cross weight"
         elif abs(cross - 50.0) > 0.7:
-            side = ("delantera derecha o la trasera izquierda" if cross < 50 else
-                    "delantera izquierda o la trasera derecha")
-            recs.append({"param": "Cross weight", "de": cross, "a": 50.0,
-                         "por": f"el auto no necesita la asimetría: sube la perch {side} de a {PERCH_STEP} "
-                                "milímetros hasta ver 50 por ciento en el garage"})
-    # --- Spring perch: rake (balance aerodinámico en lo rápido), solo si el alerón no lo resolvió
-    perch = c.get("perch", {})
-    if "LR" in perch and "RR" in perch and not any(x["param"] == "Alerón" and x["a"] < x["de"] for x in recs):
+            target, why = 50.0, "el auto no necesita la asimetría: cross weight a 50 por ciento"
+        if target is not None:
+            plan = cross_plan(perch, cross, target, cross_sens)
+            if plan["mm"]:
+                recs.append({"param": "Cross weight", "de": cross, "a": plan["cross_previsto"], "plan": plan,
+                             "actual": dict(perch), "por": why})
+    # --- Spring perch: rake (balance aerodinámico en lo rápido), solo si el alerón no lo resolvió.
+    #     Menos perch atrás = cola más alta = más inclinación = más apoyo delantero.
+    if "LR" in perch and "RR" in perch and not any(x["param"] == "Alerón" and x["a"] < x["de"] for x in recs) \
+            and not any(x["param"] == "Cross weight" for x in recs):
         if fast_under >= EVENT_RATE:
             recs.append({"param": "Perch traseras", "de": (perch["LR"], perch["RR"]),
-                         "a": (perch["LR"] + PERCH_STEP, perch["RR"] + PERCH_STEP),
-                         "por": "más inclinación (rake) mueve apoyo hacia adelante en curvas rápidas"})
+                         "a": (perch["LR"] - 2 * PERCH_STEP, perch["RR"] - 2 * PERCH_STEP),
+                         "por": "subes la cola (más rake) para llevar apoyo adelante en curvas rápidas; "
+                                "mismo valor en ambas para no tocar el cross weight. Revisa las alturas en el garage"})
 
     # --- Historial: ritmo según barras y alerón en esta pista
     if history:
@@ -163,8 +209,15 @@ def advise(flat: Dict[str, str], laps: int, counts: Dict[str, int],
 
 def phrases(recs: List[dict]) -> List[str]:
     out = []
+    names = {"LF": "delantera izquierda", "RF": "delantera derecha", "LR": "trasera izquierda", "RR": "trasera derecha"}
     for x in recs:
         de, a = x["de"], x["a"]
+        if x["param"] == "Cross weight" and x.get("plan"):
+            plan, cur = x["plan"], x["actual"]
+            moves = ", ".join(f"{names[w]} de {cur[w]:+.2f} a {plan['perch'][w]:+.2f}" for w in ("LF", "RF", "LR", "RR"))
+            out.append(f"Cross weight de {de:.1f} a unos {a:.1f} por ciento ({x['por']}). Perch en diagonal, "
+                       f"{abs(plan['mm']):.2f} milímetros en cada rueda: {moves}. Confirma el valor en el garage.")
+            continue
         if isinstance(de, tuple):
             txt = f"{x['param']}: de {de[0]:+.1f} y {de[1]:+.1f} a {a[0]:+.1f} y {a[1]:+.1f} milímetros, {x['por']}."
         elif x["param"] == "Cross weight" and "milímetros" in x["por"]:

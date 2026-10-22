@@ -138,6 +138,22 @@ class SetupDB:
         self.save()
         return rec
 
+    # ------------------------------------------- perch vs cross weight
+    def add_cross_point(self, perch: Dict[str, float], cross: float) -> bool:
+        """Cada combinación de perch que pruebas en el garage y el cross weight que resulta"""
+        pts = self.data.setdefault("cross_points", [])
+        point = {"perch": {w: round(v, 2) for w, v in perch.items()}, "cross": round(cross, 2)}
+        if point in pts:
+            return False
+        pts.append(point)
+        self.data["cross_points"] = pts[-100:]
+        self.save()
+        return True
+
+    @property
+    def cross_points(self) -> List[dict]:
+        return self.data.get("cross_points", [])
+
     # --------------------------------------------------------- consultas
     def measured(self) -> List[dict]:
         return [s for s in self.stints if s.get("medicion")]

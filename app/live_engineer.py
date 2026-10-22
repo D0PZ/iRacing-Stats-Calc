@@ -837,13 +837,29 @@ class LiveEngineer:
               f"{'con' if rec['medicion'] else 'sin'} temperaturas) -> {len(self.setup_db.stints)} en total",
               flush=True)
 
+    def _record_cross_point(self):
+        """Cada vez que cambias las perch en el garage, aprender cuánto se mueve el cross weight"""
+        if self.setup_db is None:
+            return
+        try:
+            from app.chassis_advisor import read_chassis
+            from app.setup_db import flatten_setup
+            c = read_chassis(flatten_setup(self.ir["CarSetup"] or {}))
+            if c.get("cross") is not None and len(c.get("perch", {})) == 4:
+                if self.setup_db.add_cross_point(c["perch"], c["cross"]):
+                    print(f"[setups] perch {c['perch']} -> cross weight {c['cross']} %", flush=True)
+        except Exception:
+            pass
+
     def _chassis_recs(self, laps: Optional[int] = None) -> List[str]:
         """Barras, alerón y spring perch según dónde (velocidad y sentido de curva) aparece el problema"""
-        from app.chassis_advisor import advise, phrases
+        from app.chassis_advisor import advise, learn_cross_sens, phrases
         from app.setup_db import flatten_setup
         laps = laps or max(self.laps_since_setup, 1)
         history = self.setup_db.stints if self.setup_db is not None else None
-        return phrases(advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history))
+        sens = learn_cross_sens(self.setup_db.cross_points) if self.setup_db is not None else None
+        return phrases(advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history,
+                              cross_sens=sens))
 
     def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
         """Toe por rueda según cómo se comportó el auto (por sentido de curva) y tu historial"""
@@ -993,6 +1009,7 @@ class LiveEngineer:
                 self.pit_limit_kmh *= 1.609
         except Exception:
             pass
+        self._record_cross_point()
         info = self.ir["DriverInfo"] or {}
         self.me = info.get("DriverCarIdx", -1)
         try:
