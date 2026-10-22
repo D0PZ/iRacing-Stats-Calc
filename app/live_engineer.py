@@ -418,6 +418,7 @@ class LiveEngineer:
         self.last_emit = 0.0
         self.laps_since_summary = 0
         self.session_handling: Dict[str, List[float]] = defaultdict(list)
+        self.side_counts: Dict[str, int] = {}
         self.laps_since_setup = 0
         self.prev_in_stall = False
         # Tiempo real
@@ -454,7 +455,8 @@ class LiveEngineer:
     def _new_lap_stats():
         return {"slides": 0, "understeer": 0, "wheelspin": 0, "brake_samples": 0,
                 "abs_samples": 0, "yellow": False, "offtrack": False, "pit": False,
-                "entry_slides": [], "exit_slides": [], "entry_under": [], "mid_under": [], "spin_pcts": []}
+                "entry_slides": [], "exit_slides": [], "entry_under": [], "mid_under": [], "spin_pcts": [],
+                "by_side": {}}
 
     def emit(self, text: str, priority: int = P_INFO, key: Optional[str] = None,
              cooldown: float = 0.0, ttl: float = 8.0, always: bool = False):
@@ -786,6 +788,14 @@ class LiveEngineer:
             snap["setup_actual"] = key_setup(flatten_setup(ir["CarSetup"] or {}))
         except Exception:
             pass
+        try:
+            toe = self._toe_recs()
+            if toe:
+                snap["ajustes_toe_recomendados"] = toe
+            if self.side_counts:
+                snap["eventos_por_sentido_de_curva"] = dict(self.side_counts)
+        except Exception:
+            pass
         if self.setup_db is not None and self.setup_db.stints:
             sens = self.tire_model.state["sens"] if self.tire_model is not None else None
             snap["historial_esta_pista"] = self.setup_db.summary(self._tire_targets(), sens, last_n=2)
@@ -814,6 +824,7 @@ class LiveEngineer:
             pass
         handling = {k: round(v, 2) for k, v in per_lap_events.items()}
         handling["patinaje_s_por_vuelta"] = round(spin, 2)
+        handling["por_sentido"] = dict(self.side_counts)
         rec = self.setup_db.add_stint(ir["CarSetup"] or {}, stint_laps, session=session,
                                       track_temp=ir["TrackTempCrew"], air_temp=ir["AirTemp"], handling=handling,
                                       fuel_per_lap=round(sum(fuel) / len(fuel), 3) if fuel else None,
@@ -822,6 +833,15 @@ class LiveEngineer:
         print(f"[setups] salida guardada ({rec['vueltas']} vueltas, "
               f"{'con' if rec['medicion'] else 'sin'} temperaturas) -> {len(self.setup_db.stints)} en total",
               flush=True)
+
+    def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
+        """Toe por rueda según cómo se comportó el auto (por sentido de curva) y tu historial"""
+        from app.setup_db import flatten_setup
+        from app.toe_advisor import advise, phrases
+        laps = laps or max(self.laps_since_setup, 1)
+        history = self.setup_db.stints if self.setup_db is not None else None
+        recs = advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history)
+        return phrases(recs)
 
     def _ideal_phrases(self) -> List[str]:
         """Valores ideales con todo tu historial en esta pista y auto (aunque sea otra sesión)"""
@@ -1327,10 +1347,13 @@ class LiveEngineer:
             self.slide_timer += dt
             if self.slide_timer >= 0.25 and self.slide_timer - dt < 0.25:
                 st["slides"] += 1
+                side = "izq" if yaw * sign > 0 else "der"   # sentido de la curva (el auto gira hacia ahí)
                 if brk > 0.15:
                     st["entry_slides"].append(pct)
+                    st["by_side"][f"entry_slides_{side}"] = st["by_side"].get(f"entry_slides_{side}", 0) + 1
                 elif thr > 0.4:
                     st["exit_slides"].append(pct)
+                    st["by_side"][f"exit_slides_{side}"] = st["by_side"].get(f"exit_slides_{side}", 0) + 1
                 if thr > 0.5:
                     self.emit("Cuidado con el acelerador en la salida, se te va la cola.",
                               P_CAR, key="exit_slide", cooldown=40, ttl=4)
@@ -1349,7 +1372,10 @@ class LiveEngineer:
                 self.under_timer += dt
                 if self.under_timer >= 0.5 and self.under_timer - dt < 0.5:
                     st["understeer"] += 1
-                    (st["entry_under"] if brk > 0.1 else st["mid_under"]).append(pct)
+                    kind = "entry_under" if brk > 0.1 else "mid_under"
+                    st[kind].append(pct)
+                    side = "izq" if yaw * sign > 0 else "der"
+                    st["by_side"][f"{kind}_{side}"] = st["by_side"].get(f"{kind}_{side}", 0) + 1
             else:
                 self.under_timer = 0.0
 
@@ -1420,6 +1446,8 @@ class LiveEngineer:
             self.best_lap_brakes = dict(self.last_lap_brakes)
         for kind in ("entry_slides", "exit_slides", "entry_under", "mid_under"):
             self.session_handling[kind].extend(st[kind])
+        for k, n in st["by_side"].items():
+            self.side_counts[k] = self.side_counts.get(k, 0) + n
         self.session_handling["spin_pcts"].extend(st["spin_pcts"])
         self.session_handling["wheelspin_laps"].append(st["wheelspin"])
         self.laps_since_setup += 1
@@ -2024,6 +2052,17 @@ class LiveEngineer:
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
 
+        if has("toe", "convergencia", "divergencia"):
+            recs = self._toe_recs()
+            if recs:
+                return " ".join(recs)
+            from app.setup_db import flatten_setup
+            from app.toe_advisor import read_toe
+            t = read_toe(flatten_setup(ir["CarSetup"] or {}))
+            now = ", ".join(f"{k} {v:+.1f}" for k, v in t.items())
+            return (f"Con lo que veo, no cambiaría el toe ({now} milímetros): el auto no muestra sobreviraje ni "
+                    f"subviraje de entrada marcado. Dame un par de vueltas más al límite y te digo.")
+
         if has("ideal", "ideales") and has("presion", "camber", "neumatico", "setup"):
             phrases = self._ideal_phrases()
             return phrases[0] if phrases else "Todavía no tengo salidas medidas en esta pista con este auto."
@@ -2363,7 +2402,8 @@ class LiveEngineer:
             print(f"[setup] sin datos de neumáticos: {e}", flush=True)
         if not recs:
             recs.append("El auto se ve equilibrado en estas vueltas.")
-        recs = recs[:2] + tire
+        toe = self._toe_recs(laps)
+        recs = recs[:2] + tire + toe
         self._store_stint(stint_laps, per, spin, recs)
 
         # Reporte completo en archivo
@@ -2388,6 +2428,7 @@ class LiveEngineer:
         self.emit(f"Reporte de setup de {laps} vueltas. " + " ".join(recs), P_INFO, ttl=90)
         # Reiniciar para medir el efecto de los cambios en la próxima salida
         self.session_handling = defaultdict(list)
+        self.side_counts = {}
         self.laps_since_setup = 0
 
 

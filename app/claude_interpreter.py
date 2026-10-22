@@ -41,7 +41,10 @@ Reglas:
 - historial_esta_pista trae tus salidas ANTERIORES en esta misma pista con este auto, de cualquier sesión o día,
   con su setup, lo medido en pits y el ritmo. ideales_por_rueda son los valores ideales estimados con todo ese
   historial: úsalos cuando pregunten por presiones, camber o setup ideal aunque en esta sesión no haya mediciones.
-- setup_actual es el setup cargado ahora mismo (toe, barras, ala, presiones, camber, pastillas, etc.)."""
+- setup_actual es el setup cargado ahora mismo (toe, barras, ala, presiones, camber, pastillas, etc.).
+- Toe: usa ajustes_toe_recomendados si vienen. Toe-in trasero = estabilidad, menos rotación y velocidad punta;
+  la trasera exterior estabiliza cada curva (a la derecha trabaja la izquierda). eventos_por_sentido_de_curva
+  separa derrapes y subviraje en curvas a la izquierda (izq) y a la derecha (der)."""
 
 
 def credentials_available() -> bool:
