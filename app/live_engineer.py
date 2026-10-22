@@ -1672,26 +1672,8 @@ class LiveEngineer:
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
 
-        if has("neumatico", "goma", "cubierta", "llanta", "rueda", "presion"):
-            parts = []
-            temps = {c: [ir[f"{c}temp{x}"] for x in ("L", "M", "R")] for c in ("LF", "RF", "LR", "RR")}
-            if all(v is not None for t in temps.values() for v in t):
-                avg = {c: sum(t) / 3 for c, t in temps.items()}
-                parts.append(f"temperaturas: delanteras {avg['LF']:.0f} y {avg['RF']:.0f}, "
-                             f"traseras {avg['LR']:.0f} y {avg['RR']:.0f} grados")
-            press = [ir[f"{c}pressure"] for c in ("LF", "RF", "LR", "RR")]
-            if all(p is not None for p in press) and has("presion"):
-                parts.append("presiones " + ", ".join(f"{p:.0f}" for p in press) + " kilopascales")
-            stint = len(self.my_laps) - self.stint_start_lap + 1
-            if stint > 0:
-                parts.append(f"llevan {stint} vueltas")
-            recent = [l for l in self.my_laps[-3:]]
-            slides = sum(l.get("slides", 0) for l in recent)
-            spin = sum(l.get("wheelspin", 0) for l in recent)
-            if recent:
-                parts.append(f"en las últimas vueltas {slides} derrapes y {spin:.1f} segundos patinando"
-                             + (", cuídalas en las salidas" if slides > 6 or spin > 4 else ", van bien"))
-            return ("Neumáticos: " + "; ".join(parts) + ".") if parts else "Todavía no tengo datos de neumáticos."
+        if has("neumatico", "goma", "cubierta", "llanta", "rueda", "presion", "camber"):
+            return self._tire_answer(n)
 
         if has("incidente"):
             inc = ir["PlayerCarMyIncidentCount"] or 0
@@ -1812,6 +1794,60 @@ class LiveEngineer:
 
         return ("No entendí. Pregúntame por daños, combustible, pits, neumáticos, límites, "
                 "el de adelante o atrás, vueltas, tiempos o dónde pierdes.")
+
+    def _tire_answer(self, n: str) -> str:
+        """
+        iRacing no entrega la temperatura de los neumáticos mientras corres: la de carcasa
+        (tempCL/CM/CR), el desgaste y la presión en caliente se actualizan al entrar a pits.
+        """
+        ir = self.ir
+        names = {"LF": "delantera izquierda", "RF": "delantera derecha",
+                 "LR": "trasera izquierda", "RR": "trasera derecha"}
+        temps = {c: [ir[f"{c}tempC{x}"] for x in ("L", "M", "R")] for c in names}
+        parts = []
+        if all(v is not None for t in temps.values() for v in t) and \
+                max(max(t) for t in temps.values()) - min(min(t) for t in temps.values()) >= 2:
+            def omi(c):  # exterior, centro, interior (en las izquierdas L es el exterior)
+                l, m, r = temps[c]
+                return (l, m, r) if c[0] == "L" else (r, m, l)
+            parts.append("Medidas en tu última entrada a pits, de exterior a interior: " + "; ".join(
+                f"{names[c]} {omi(c)[0]:.0f}, {omi(c)[1]:.0f} y {omi(c)[2]:.0f}" for c in names) + " grados")
+        hot = {}
+        try:
+            for path, value in self._walk(ir["CarSetup"] or {}):
+                corner = next((k for k, v in {"LF": "LeftFront", "RF": "RightFront",
+                                              "LR": "LeftRear", "RR": "RightRear"}.items() if v in path), None)
+                if corner and path[-1] == "LastHotPressure":
+                    hot[corner] = self._nums(value)[0]
+        except Exception:
+            pass
+        cold = [ir[f"{c}coldPressure"] for c in names]
+        if len(hot) == 4:
+            parts.append(f"presión en caliente {hot['LF']:.0f} y {hot['RF']:.0f} adelante, "
+                         f"{hot['LR']:.0f} y {hot['RR']:.0f} atrás")
+        if all(c is not None for c in cold):
+            parts.append(f"en frío {cold[0]:.0f} adelante y {cold[2]:.0f} atrás")
+        wear = [ir[f"{c}wear{x}"] for c in names for x in ("L", "M", "R")]
+        if all(w is not None for w in wear):
+            parts.append(f"desgaste mínimo {min(wear) * 100:.0f} por ciento")
+        if not parts:
+            return ("iRacing no entrega la temperatura de los neumáticos mientras corres. "
+                    "Entra a pits y te digo temperaturas, presiones y qué ajustar.")
+        msg = ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+        try:
+            recs = self._tire_analysis(ir["CarSetup"] or {})
+        except Exception:
+            recs = []
+        if recs:
+            msg += " Recomendación: " + " ".join(recs[:2])
+        elif temps and parts:
+            msg += " Camber y presiones se ven bien."
+        recent = self.my_laps[-3:]
+        slides = sum(l.get("slides", 0) for l in recent)
+        spin = sum(l.get("wheelspin", 0) for l in recent)
+        if recent and (slides > 6 or spin > 4):
+            msg += f" Ojo: {slides} derrapes y {spin:.1f} segundos patinando en las últimas vueltas, cuídalas."
+        return msg
 
     def _rival_answer(self, idx: int, where: str) -> str:
         gap = self._gap_to(idx)

@@ -265,3 +265,30 @@ def test_question_without_own_car_gets_an_answer(eng):
     eng.ask("¿cuánto combustible me queda?")
     tick(eng)
     assert "no estás en un auto" in texts(eng)[-1]
+
+
+def test_tire_question_uses_pit_measurements(eng):
+    """Datos reales de una sesión en COTA: delanteras con 13 grados de diferencia interior/exterior"""
+    tick(eng)
+    vals = {"LF": (65.0, 75.7, 78.1), "RF": (71.9, 69.0, 59.1), "LR": (66.6, 72.3, 75.8), "RR": (74.5, 71.5, 66.3)}
+    for c, (l, m, r) in vals.items():
+        eng.ir.v.update({f"{c}tempCL": l, f"{c}tempCM": m, f"{c}tempCR": r, f"{c}coldPressure": 182.7,
+                         f"{c}wearL": 0.95, f"{c}wearM": 0.95, f"{c}wearR": 0.97})
+    eng.ir.v["CarSetup"] = {"Tires": {
+        "LeftFront": {"LastHotPressure": "193 kPa", "LastTempsOMI": "65C, 76C, 78C"},
+        "RightFront": {"LastHotPressure": "190 kPa", "LastTempsIMO": "72C, 69C, 59C"},
+        "LeftRear": {"LastHotPressure": "183 kPa", "LastTempsOMI": "67C, 72C, 76C"},
+        "RightRear": {"LastHotPressure": "182 kPa", "LastTempsIMO": "75C, 72C, 66C"}}}
+    eng.ask("temperatura de neumáticos")
+    tick(eng)
+    out = texts(eng)[-1]
+    assert "delantera izquierda 65, 76 y 78" in out
+    assert "193 y 190 adelante" in out
+    assert "Camber delantero" in out
+
+
+def test_tire_question_without_pit_data(eng):
+    tick(eng)
+    eng.ask("¿cómo están las gomas?")
+    tick(eng)
+    assert "Entra a pits" in texts(eng)[-1]
