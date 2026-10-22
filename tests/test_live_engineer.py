@@ -305,8 +305,10 @@ class FakeClaude:
     def __init__(self, reply):
         self.reply, self.calls = reply, []
 
-    def answer(self, question, snapshot):
+    def answer(self, question, snapshot, on_sentence=None):
         self.calls.append((question, snapshot))
+        if self.reply and on_sentence:
+            on_sentence(self.reply)
         return self.reply
 
 

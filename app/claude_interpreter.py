@@ -11,6 +11,7 @@ Dos formas de llamar a Claude:
 """
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -32,7 +33,8 @@ Recibes un resumen de los datos actuales en JSON y una pregunta del piloto.
 Reglas:
 - Responde solo con lo que muestran los datos. Si un dato no está, dilo en pocas palabras; no inventes valores.
 - Interpreta: no recites el JSON. Di qué significa y, si aplica, qué hacer.
-- Español de Chile, directo y breve: máximo 3 frases cortas (unas 40 palabras), se lee en voz alta.
+- Español de Chile, directo: máximo 2 frases cortas (25 palabras en total), se lee en voz alta en plena carrera.
+- Empieza por la respuesta, sin saludos ni repetir la pregunta.
 - Sin símbolos ni markdown. Escribe las unidades con palabras (litros, segundos, grados, kilopascales).
 - Las temperaturas de neumáticos son de la última entrada a pits (exterior, centro, interior); iRacing no las da en pista.
 - Ajustes de neumáticos: el objetivo es interior sobre exterior según tire_targets y centro igual al promedio de los bordes."""
@@ -131,3 +133,113 @@ class ClaudeCodeInterpreter:
             return None
         print(f"[claude] respuesta en {time.time() - t0:.1f} s (suscripción)", flush=True)
         return text
+
+
+class ClaudeCodeSession:
+    """
+    Sesión de Claude Code abierta todo el rato (stream-json): sin el arranque de ~2 s por pregunta
+    y entregando cada frase apenas Claude la escribe. Usa tu suscripción, sin costo extra.
+    Se reinicia cada `max_turns` preguntas para que el historial no crezca.
+    """
+
+    def __init__(self, model: Optional[str] = "haiku", effort: str = "low", timeout: float = 20.0,
+                 max_turns: int = 15):
+        import queue as _queue
+        import threading as _threading
+        self._queue_mod, self._threading = _queue, _threading
+        self.exe = shutil.which("claude")
+        self.model, self.effort, self.timeout, self.max_turns = model, effort, timeout, max_turns
+        self.cwd = os.path.join(tempfile.gettempdir(), "iracing_engineer_claude")
+        os.makedirs(self.cwd, exist_ok=True)
+        self.proc = None
+        self.events = None
+        self.turns = 0
+        self.lock = _threading.Lock()
+        self._start()
+
+    @staticmethod
+    def available() -> bool:
+        return shutil.which("claude") is not None
+
+    def _start(self):
+        cmd = [self.exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+               "--include-partial-messages", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+               "--effort", self.effort,
+               "--system-prompt", SYSTEM + "\n- Cada mensaje trae los datos actuales: usa solo los del último mensaje."]
+        if self.model:
+            cmd += ["--model", self.model]
+        env = dict(os.environ)
+        env.pop("ANTHROPIC_API_KEY", None)        # siempre la suscripción, nunca una clave con cobro
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, encoding="utf-8", cwd=self.cwd,
+                                     env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.events = self._queue_mod.Queue()
+        proc, events = self.proc, self.events
+
+        def reader():
+            for line in proc.stdout:
+                try:
+                    events.put(json.loads(line))
+                except ValueError:
+                    continue
+            events.put(None)   # proceso terminado
+        self._threading.Thread(target=reader, daemon=True).start()
+        self.turns = 0
+
+    def close(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=3)
+            except Exception:
+                self.proc.kill()
+
+    def answer(self, question: str, snapshot: dict, on_sentence=None) -> Optional[str]:
+        """Devuelve la respuesta completa; on_sentence(frase) se llama con cada frase terminada"""
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None or self.turns >= self.max_turns:
+                self.close()
+                self._start()
+            data = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), default=str)
+            msg = {"type": "user", "message": {"role": "user",
+                                               "content": f"Datos:\n{data}\n\nPregunta del piloto: {question}"}}
+            t0 = time.time()
+            try:
+                self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except OSError:
+                self.proc = None
+                return None
+            self.turns += 1
+            text, pending = "", ""
+            while True:
+                try:
+                    ev = self.events.get(timeout=max(0.1, self.timeout - (time.time() - t0)))
+                except self._queue_mod.Empty:
+                    print(f"[claude] sin respuesta en {self.timeout:.0f} s, reinicio la sesión", flush=True)
+                    self.close()
+                    self.proc = None
+                    return None
+                if ev is None:
+                    print("[claude] la sesión de Claude Code se cerró, la reabro en la próxima pregunta", flush=True)
+                    self.proc = None
+                    return text.strip() or None
+                kind = ev.get("type")
+                if kind == "stream_event":
+                    delta = ev.get("event", {}).get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text += delta["text"]
+                        pending += delta["text"]
+                        # Entregar cada frase completa apenas termina
+                        while on_sentence:
+                            m = re.search(r"[.!?](\s|$)", pending)
+                            if not m or m.end() == len(pending) and not pending.endswith((" ", "\n")):
+                                break
+                            sentence, pending = pending[:m.end()].strip(), pending[m.end():]
+                            if sentence:
+                                on_sentence(sentence)
+                elif kind == "result":
+                    if on_sentence and pending.strip():
+                        on_sentence(pending.strip())
+                    print(f"[claude] respuesta en {time.time() - t0:.1f} s (suscripción, sesión abierta)", flush=True)
+                    return text.strip() or None

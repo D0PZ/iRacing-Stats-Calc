@@ -80,12 +80,13 @@ class NeuralTTS:
         import asyncio
         import edge_tts
 
+        part = f"{path}.{threading.get_ident()}.part"
+
         async def go():
-            await edge_tts.Communicate(text, self.voice, rate=self.rate).save(path + ".part")
+            await edge_tts.Communicate(text, self.voice, rate=self.rate).save(part)
         try:
-            with self._lock:
-                asyncio.run(asyncio.wait_for(go(), timeout))
-            os.replace(path + ".part", path)
+            asyncio.run(asyncio.wait_for(go(), timeout))
+            os.replace(part, path)
             return path
         except Exception as e:
             print(f"[voz] Voz neuronal no disponible ({type(e).__name__}); uso la de Windows.", flush=True)
@@ -111,7 +112,7 @@ PREWARM_PHRASES = (
     + ["Accidente justo detrás tuyo.", "Bandera amarilla en tu sector, cuidado, no adelantes.",
        "Caución, full course yellow. No adelantes.", "Bandera azul, te van a pasar, mantén tu línea.",
        "¡El de adelante se salió de pista! Aprovecha.", "El de atrás se salió, ganas aire.",
-       "Última vuelta. Dalo todo.", "¡Verde, verde, verde! Vamos.", "Motor apagado, arranca."]
+       "Última vuelta. Dalo todo.", "¡Verde, verde, verde! Vamos.", "Motor apagado, arranca.", "Copiado."]
 )
 
 
@@ -140,8 +141,13 @@ class Voice:
 
     def say(self, text: str, priority: int, ttl: float = 8.0):
         now = time.time()
-        # PriorityQueue saca el menor primero: prioridad negativa y luego orden de llegada
-        self.q.put(Message(-priority * 1e6 + now, text, priority, now + ttl))
+        # Frases largas: cada oración por separado, para empezar a hablar con la primera
+        parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if p.strip()] if len(text) > 90 else [text]
+        for i, part in enumerate(parts):
+            if self.neural is not None:   # sintetizar ya, en paralelo, mientras se habla lo anterior
+                threading.Thread(target=self.neural.synth, args=(part,), daemon=True).start()
+            # PriorityQueue saca el menor primero: prioridad negativa y luego orden de llegada
+            self.q.put(Message(-priority * 1e6 + now + i * 1e-3, part, priority, now + ttl))
 
     def stop(self):
         self._stop.set()
@@ -171,6 +177,11 @@ class Voice:
             if time.time() > msg.expires:
                 continue  # Mensaje viejo, ya no sirve
             if self.neural is not None:
+                # Si la síntesis en paralelo ya está en curso, esperarla un momento en vez de repetirla
+                for _ in range(40):
+                    if os.path.exists(self.neural.file_for(msg.text)) or msg.priority >= P_SAFETY:
+                        break
+                    time.sleep(0.05)
                 cached = os.path.exists(self.neural.file_for(msg.text))
                 # Una urgencia no espera 1.5 s a la voz neuronal: si no está en caché, voz de Windows ya
                 urgent_uncached = msg.priority >= P_SAFETY and not cached and speaker is not None
@@ -534,7 +545,7 @@ class LiveEngineer:
         backend "claude_code" (por defecto): tu suscripción de Claude vía Claude Code, sin costo extra.
         backend "api": ANTHROPIC_API_KEY, se cobra aparte; solo si lo eliges explícitamente.
         """
-        from app.claude_interpreter import (ANTHROPIC_AVAILABLE, ClaudeCodeInterpreter, ClaudeInterpreter,
+        from app.claude_interpreter import (ANTHROPIC_AVAILABLE, ClaudeCodeSession, ClaudeInterpreter,
                                             credentials_available)
         from app.voice_commands import load_config
         cfg = load_config().get("claude", {}) or {}
@@ -548,9 +559,10 @@ class LiveEngineer:
                 return ClaudeInterpreter(model=model, effort=effort)
             print("[claude] backend 'api' sin ANTHROPIC_API_KEY: respondo con reglas locales", flush=True)
             return None
-        if ClaudeCodeInterpreter.available():
-            print(f"[claude] intérprete con tu suscripción vía Claude Code (esfuerzo {effort})", flush=True)
-            return ClaudeCodeInterpreter(model=cfg.get("model"), effort=effort)
+        if ClaudeCodeSession.available():
+            model = cfg.get("model", "haiku")
+            print(f"[claude] intérprete con tu suscripción vía Claude Code ({model}, sesión abierta)", flush=True)
+            return ClaudeCodeSession(model=model, effort=effort)
         print("[claude] Claude Code no está instalado: respondo con reglas locales", flush=True)
         return None
 
@@ -560,8 +572,19 @@ class LiveEngineer:
                                     "no me hables", "habla", "vuelve", "activa la radio"))
 
     def _ask_claude(self, question: str, snapshot: dict, fallback: str):
-        text = self.claude.answer(question, snapshot)
-        self.emit(text or fallback, P_BATTLE + 5, ttl=25, always=True)
+        spoken = []
+
+        def say_sentence(sentence: str):   # hablar cada frase apenas Claude la termina
+            spoken.append(sentence)
+            self.emit(sentence, P_BATTLE + 5, ttl=25, always=True)
+        try:
+            text = self.claude.answer(question, snapshot, on_sentence=say_sentence)
+        except TypeError:   # intérpretes sin streaming
+            text = self.claude.answer(question, snapshot)
+            if text:
+                say_sentence(text)
+        if not spoken:
+            self.emit(text or fallback, P_BATTLE + 5, ttl=25, always=True)
 
     def _snapshot(self) -> dict:
         """Resumen compacto del estado actual para que Claude lo interprete"""
@@ -703,6 +726,8 @@ class LiveEngineer:
                 print(f"[error] {e}", flush=True)
                 time.sleep(0.05)
         self._save_limits()
+        if self.claude is not None and hasattr(self.claude, "close"):
+            self.claude.close()
         self.voice.stop()
 
     def stop(self):
@@ -815,6 +840,7 @@ class LiveEngineer:
                     print(f"[claude] no pude armar el resumen: {e}", flush=True)
                     self.emit(answer, P_BATTLE + 5, ttl=20, always=True)
                     continue
+                self.voice.say("Copiado.", P_BATTLE + 5, ttl=3)   # pre-sintetizado: sale al instante
                 threading.Thread(target=self._ask_claude, args=(q, snap, answer), daemon=True).start()
 
         num = ir["SessionNum"]
