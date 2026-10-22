@@ -69,12 +69,12 @@ class NeuralTTS:
         self._slots = threading.Semaphore(2)   # no saturar el servicio de voz con muchas frases a la vez
         self._fails = 0
 
-    def file_for(self, text: str) -> str:
-        key = self._hash(f"{self.voice}|{self.rate}|{text}".encode("utf-8")).hexdigest()[:20]
+    def file_for(self, text: str, rate: Optional[str] = None) -> str:
+        key = self._hash(f"{self.voice}|{rate or self.rate}|{text}".encode("utf-8")).hexdigest()[:20]
         return os.path.join(self.cache_dir, f"{key}.mp3")
 
-    def synth(self, text: str, timeout: float = 6.0) -> Optional[str]:
-        path = self.file_for(text)
+    def synth(self, text: str, timeout: float = 6.0, rate: Optional[str] = None) -> Optional[str]:
+        path = self.file_for(text, rate)
         if os.path.exists(path) and os.path.getsize(path) > 0:
             return path
         if time.time() < self.failed_until:
@@ -85,7 +85,7 @@ class NeuralTTS:
         part = f"{path}.{threading.get_ident()}.part"
 
         async def go():
-            await edge_tts.Communicate(text, self.voice, rate=self.rate).save(part)
+            await edge_tts.Communicate(text, self.voice, rate=rate or self.rate).save(part)
         with self._slots:
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 return path   # otra hebra ya la generó mientras esperábamos turno
@@ -105,29 +105,39 @@ class NeuralTTS:
             return None
 
     @staticmethod
-    def play(path: str):
-        """Reproduce un mp3 con el MCI de Windows (sin abrir ventanas)"""
+    def play(path: str, interrupt: Optional[threading.Event] = None):
+        """Reproduce un mp3 con el MCI de Windows (sin ventanas); se corta si llega una urgencia"""
         import ctypes
         mci = ctypes.windll.winmm.mciSendStringW
         alias = f"radio{threading.get_ident()}"
         mci(f'open "{path}" type mpegvideo alias {alias}', None, 0, None)
-        mci(f"play {alias} wait", None, 0, None)
+        if interrupt is None:
+            mci(f"play {alias} wait", None, 0, None)
+        else:
+            mci(f"play {alias}", None, 0, None)
+            buf = ctypes.create_unicode_buffer(32)
+            while True:
+                mci(f"status {alias} mode", buf, 32, None)
+                if buf.value != "playing" or interrupt.is_set():
+                    break
+                time.sleep(0.03)
+            mci(f"stop {alias}", None, 0, None)
         mci(f"close {alias}", None, 0, None)
 
 
 # Frases urgentes que conviene tener sintetizadas de antemano (latencia cero)
-PREWARM_PHRASES = (
-    [f"¡Cuidado! Auto detenido a {d} metros." for d in range(100, 800, 100)]
-    + [f"¡Cuidado! Auto trompeado a {d} metros." for d in range(100, 800, 100)]
-    + [f"Auto fuera de pista a {d} metros." for d in range(100, 500, 100)]
-    + ["Accidente justo detrás tuyo.", "Bandera amarilla en tu sector, cuidado, no adelantes.",
-       "Caución, full course yellow. No adelantes.", "Bandera azul, te van a pasar, mantén tu línea.",
-       "¡El de adelante se salió de pista! Aprovecha.", "El de atrás se salió, ganas aire.",
-       "Última vuelta. Dalo todo.", "¡Verde, verde, verde! Vamos.", "Motor apagado, arranca.", "Copiado.",
-       "¡Bandera negra! Tienes penalización, entra a pits.", "Bandera de reparación, daño obligatorio, entra a pits.",
-       "¡Limitador!", "¡Velocidad en pits, frena!", "Entrada de pits, frena y pon el limitador.",
-       "Restos en pista.", "Todavía no estoy conectado a iRacing.", "No te entendí, repite."]
+URGENT_RATE = "+30%"     # llamadas urgentes: más rápidas
+# Frases urgentes pre-sintetizadas (latencia cero, misma voz). Se generan con URGENT_RATE.
+PREWARM_URGENT = (
+    [f"¡Auto parado a {d}!" for d in range(100, 800, 100)]
+    + [f"¡Trompo a {d}!" for d in range(100, 800, 100)]
+    + [f"Fuera de pista a {d}." for d in range(100, 400, 100)]
+    + ["Accidente atrás.", "¡Amarilla, no adelantes!", "¡Full course yellow!", "Azul, mantén la línea.",
+       "Restos en pista.", "¡Negra, a pits!", "¡Reparación, a pits!", "¡Motor apagado!", "¡Limitador!",
+       "¡Velocidad en pits!", "¡Limitador, entrada de pits!", "Última vuelta.", "¡Verde, verde, verde!",
+       "¡Se salió el de adelante, aprovecha!", "Se salió el de atrás.", "Copiado."]
 )
+PREWARM_NORMAL = ["Todavía no estoy conectado a iRacing.", "No te entendí, repite."]
 
 
 class Voice:
@@ -139,6 +149,7 @@ class Voice:
         self.neural: Optional[NeuralTTS] = None
         self.q: "queue.PriorityQueue[Message]" = queue.PriorityQueue()
         self._stop = threading.Event()
+        self._urgent = threading.Event()   # corta lo que se esté diciendo si llega un peligro
         if enabled and neural_voice:
             try:
                 self.neural = NeuralTTS(neural_voice)
@@ -148,18 +159,28 @@ class Voice:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    @staticmethod
+    def rate_for(priority: int) -> Optional[str]:
+        return URGENT_RATE if priority >= P_FLAG else None
+
     def _prewarm(self):
-        for phrase in PREWARM_PHRASES:
+        for phrase in PREWARM_URGENT:
+            if self._stop.is_set() or self.neural.synth(phrase, rate=URGENT_RATE) is None:
+                return
+        for phrase in PREWARM_NORMAL:
             if self._stop.is_set() or self.neural.synth(phrase) is None:
-                break
+                return
 
     def say(self, text: str, priority: int, ttl: float = 8.0):
         now = time.time()
         # Frases largas: cada oración por separado, para empezar a hablar con la primera
         parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if p.strip()] if len(text) > 90 else [text]
+        if priority >= P_SAFETY:
+            self._urgent.set()
         for i, part in enumerate(parts):
             if self.neural is not None:   # sintetizar ya, en paralelo, mientras se habla lo anterior
-                threading.Thread(target=self.neural.synth, args=(part,), daemon=True).start()
+                threading.Thread(target=self.neural.synth, args=(part,),
+                                 kwargs={"rate": self.rate_for(priority)}, daemon=True).start()
             # PriorityQueue saca el menor primero: prioridad negativa y luego orden de llegada
             self.q.put(Message(-priority * 1e6 + now + i * 1e-3, part, priority, now + ttl))
 
@@ -196,14 +217,19 @@ class Voice:
             if self.neural is not None:
                 # Si la síntesis en paralelo ya está en curso, esperarla un momento en vez de repetirla.
                 # Misma voz siempre: la de Windows solo si el servicio de voz neuronal no responde.
+                rate = self.rate_for(msg.priority)
                 for _ in range(40):
-                    if os.path.exists(self.neural.file_for(msg.text)):
+                    if os.path.exists(self.neural.file_for(msg.text, rate)):
                         break
                     time.sleep(0.05)
-                path = self.neural.synth(msg.text)
+                path = self.neural.synth(msg.text, rate=rate)
                 if path and time.time() <= msg.expires:
                     try:
-                        self.neural.play(path)
+                        if msg.priority >= P_SAFETY:
+                            self._urgent.clear()
+                            self.neural.play(path)                  # una urgencia no se interrumpe
+                        else:
+                            self.neural.play(path, self._urgent)    # se corta si llega una urgencia
                         continue
                     except Exception:
                         pass
@@ -1059,10 +1085,10 @@ class LiveEngineer:
                           P_BATTLE, key=f"pit{idx}", cooldown=60)
             elif c.surface == 0 and c.prev_surface == 3:
                 if role == "adelante":
-                    self.emit("¡El de adelante se salió de pista! Aprovecha.", P_BATTLE,
+                    self.emit("¡Se salió el de adelante, aprovecha!", P_BATTLE,
                               key=f"off{idx}", cooldown=20, ttl=4)
                 else:
-                    self.emit("El de atrás se salió, ganas aire.", P_BATTLE, key=f"off{idx}",
+                    self.emit("Se salió el de atrás.", P_BATTLE, key=f"off{idx}",
                               cooldown=20, ttl=5)
 
     # ------------------------------------------------------------- tráfico
@@ -1119,17 +1145,17 @@ class LiveEngineer:
             # Frenar para una horquilla no es accidente: exigir muy lento o fuera de pista
             spun = c.max_recent_speed > 25 and (c.speed < 10 or (off and c.speed < 0.4 * c.max_recent_speed))
             if ahead_m < 700 and (stopped or (off and spun)):
-                where = f"a {max(100, int(round(ahead_m, -2)))} metros"
+                where = f"a {max(100, int(round(ahead_m, -2)))}"
                 if stopped:
-                    self.emit(f"¡Cuidado! Auto detenido {where}.", P_SAFETY, ttl=4)
+                    self.emit(f"¡Auto parado {where}!", P_SAFETY, ttl=3)
                 else:
-                    self.emit(f"¡Cuidado! Auto trompeado {where}.", P_SAFETY, ttl=4)
+                    self.emit(f"¡Trompo {where}!", P_SAFETY, ttl=3)
                 c.hazard_cooldown = now + 15
             elif ahead_m < 300 and off and c.speed > 15:
-                self.emit(f"Auto fuera de pista a {max(100, int(round(ahead_m, -2)))} metros.", P_SAFETY, ttl=4)
+                self.emit(f"Fuera de pista a {max(100, int(round(ahead_m, -2)))}.", P_SAFETY, ttl=3)
                 c.hazard_cooldown = now + 12
             elif behind_m < 150 and (stopped or (off and spun)):
-                self.emit("Accidente justo detrás tuyo.", P_CAR, ttl=4)
+                self.emit("Accidente atrás.", P_CAR, ttl=3)
                 c.hazard_cooldown = now + 15
 
     # --------------------------------------------------------------- flags
@@ -1141,19 +1167,19 @@ class LiveEngineer:
         new = flags & ~self.prev_flags
         F = irsdk.Flags
         if new & (F.caution | F.caution_waving):
-            self.emit("Caución, full course yellow. No adelantes.", P_FLAG, key="caution", cooldown=10)
+            self.emit("¡Full course yellow!", P_FLAG, key="caution", cooldown=10, ttl=4)
         elif new & (F.yellow | F.yellow_waving):
-            self.emit("Bandera amarilla en tu sector, cuidado, no adelantes.", P_FLAG, key="yellow", cooldown=6)
+            self.emit("¡Amarilla, no adelantes!", P_FLAG, key="yellow", cooldown=6, ttl=3)
         if new & F.debris:
-            self.emit("Restos en pista.", P_FLAG, key="debris", cooldown=15)
+            self.emit("Restos en pista.", P_FLAG, key="debris", cooldown=15, ttl=4)
         if new & F.blue:
-            self.emit("Bandera azul, te van a pasar, mantén tu línea.", P_FLAG, key="blue", cooldown=20)
+            self.emit("Azul, mantén la línea.", P_FLAG, key="blue", cooldown=20, ttl=4)
         if new & F.black:
-            self.emit("¡Bandera negra! Tienes penalización, entra a pits.", P_SAFETY, key="black", cooldown=30)
+            self.emit("¡Negra, a pits!", P_SAFETY, key="black", cooldown=30)
         if new & F.repair:
-            self.emit("Bandera de reparación, daño obligatorio, entra a pits.", P_SAFETY, key="repair", cooldown=30)
+            self.emit("¡Reparación, a pits!", P_SAFETY, key="repair", cooldown=30)
         if new & F.white:
-            self.emit("Última vuelta. Dalo todo.", P_FLAG, key="white", cooldown=60)
+            self.emit("Última vuelta.", P_FLAG, key="white", cooldown=60)
         if new & F.checkered:
             self.emit(f"Bandera a cuadros. Buen trabajo, {self.name}.", P_FLAG, key="checkered", cooldown=120)
         if flags & (F.caution | F.caution_waving):
@@ -1169,7 +1195,7 @@ class LiveEngineer:
             except Exception:
                 pass
             if "race" in session_type:
-                self.emit("¡Verde, verde, verde! Vamos.", P_FLAG)
+                self.emit("¡Verde, verde, verde!", P_FLAG)
         self.prev_state = state
 
     # ---------------------------------------------------- driver dynamics
@@ -1581,7 +1607,7 @@ class LiveEngineer:
         if new & W.oil_temp_warning:
             self.emit("Temperatura de aceite alta.", P_CAR, key="oilt", cooldown=60)
         if new & W.engine_stalled:
-            self.emit("Motor apagado, arranca.", P_SAFETY, key="stall", cooldown=10)
+            self.emit("¡Motor apagado!", P_SAFETY, key="stall", cooldown=10)
         self.prev_warnings = warn
 
 
@@ -1599,10 +1625,10 @@ class LiveEngineer:
             if not limiter and v > limit * 0.6:
                 self.emit("¡Limitador!", P_SAFETY, key="limiter", cooldown=4, ttl=2)
             if v > limit + 0.5:
-                self.emit("¡Velocidad en pits, frena!", P_SAFETY,
+                self.emit("¡Velocidad en pits!", P_SAFETY,
                           key="pitspeed", cooldown=3, ttl=2)
         elif surface == 2 and not limiter and v > limit + 20:  # aproximándose a la entrada de pits
-            self.emit("Entrada de pits, frena y pon el limitador.", P_SAFETY, key="pitentry",
+            self.emit("¡Limitador, entrada de pits!", P_SAFETY, key="pitentry",
                       cooldown=20, ttl=3)
 
     # --------------------------------------------------------------- clima

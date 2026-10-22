@@ -83,9 +83,9 @@ def test_stopped_car_ahead(monkeypatch):
     r.step(2.0)                              # el rival venía rápido...
     r.cars[1]["v"] = 0.0                     # ...y se detiene en pista
     r.step(3.0)
-    hits = r.said("detenido")
+    hits = r.said("parado")
     assert hits, r.msgs
-    assert "metros" in hits[0]
+    assert len(hits[0].split()) <= 5          # llamada urgente breve
 
 
 def test_braking_rival_is_not_a_crash(monkeypatch):
@@ -94,7 +94,7 @@ def test_braking_rival_is_not_a_crash(monkeypatch):
     r.step(2.0)
     r.cars[1]["v"] = 22.0
     r.step(3.0)
-    assert not r.said("detenido") and not r.said("trompeado"), r.msgs
+    assert not r.said("parado") and not r.said("trompo"), r.msgs
 
 
 def test_rival_ahead_enters_pits(monkeypatch):
@@ -120,7 +120,7 @@ def test_far_off_track_car_is_ignored(monkeypatch):
     r.cars[1]["surface"] = 0
     r.cars[1]["v"] = 5.0
     r.step(2.0)
-    assert not r.said("metros"), r.msgs
+    assert not r.said("fuera de pista") and not r.said("parado"), r.msgs
 
 
 def test_attack_call_when_rival_ahead_is_slower(monkeypatch):
