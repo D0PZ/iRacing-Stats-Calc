@@ -229,6 +229,7 @@ class LiveEngineer:
         self.last_spoken = ""
         self.on_track = False
         self.tire_model = None
+        self.claude = self._init_claude()
         self.auto_record = auto_record
         self._we_record = False          # la grabación la inició el ingeniero
         self._off_track_since: Optional[float] = None
@@ -527,6 +528,106 @@ class LiveEngineer:
         parts.append(f"Paciencia en la primera curva. Vamos, {self.name}.")
         return " ".join(parts)
 
+    # ------------------------------------------- Claude como intérprete
+    def _init_claude(self):
+        from app.claude_interpreter import ANTHROPIC_AVAILABLE, ClaudeInterpreter, credentials_available
+        from app.voice_commands import load_config
+        cfg = load_config().get("claude", {}) or {}
+        if not cfg.get("enabled", True):
+            return None
+        if not ANTHROPIC_AVAILABLE:
+            print("[claude] falta el SDK: pip install anthropic (respondo con reglas locales)", flush=True)
+            return None
+        if not credentials_available():
+            print("[claude] sin ANTHROPIC_API_KEY: respondo con reglas locales", flush=True)
+            return None
+        model = cfg.get("model", "claude-opus-5-5")
+        print(f"[claude] intérprete activo ({model}, esfuerzo {cfg.get('effort', 'low')})", flush=True)
+        return ClaudeInterpreter(model=model, effort=cfg.get("effort", "low"))
+
+    def _is_radio_command(self, q: str) -> bool:
+        n = self._norm(q)
+        return any(w in n for w in ("repite", "repeti", "que dijiste", "silencio", "callate", "calla",
+                                    "no me hables", "habla", "vuelve", "activa la radio"))
+
+    def _ask_claude(self, question: str, snapshot: dict, fallback: str):
+        text = self.claude.answer(question, snapshot)
+        self.emit(text or fallback, P_BATTLE + 5, ttl=25, always=True)
+
+    def _snapshot(self) -> dict:
+        """Resumen compacto del estado actual para que Claude lo interprete"""
+        ir = self.ir
+        r1 = lambda x, d=1: None if x is None else round(float(x), d)
+        snap = {"pista": self.track_name, "auto": self.car_name, "es_carrera": self.is_race}
+        my_pos, ahead, behind = self._class_neighbors()
+        last, best = ir["LapLastLapTime"], ir["LapBestLapTime"]
+        snap["piloto"] = {
+            "posicion_clase": my_pos or None, "vueltas_completadas": ir["LapCompleted"],
+            "vueltas_restantes": self.laps_left(), "ultima_vuelta_s": r1(last if last and last > 0 else None, 2),
+            "mejor_vuelta_s": r1(best if best and best > 0 else None, 2), "delta_vs_mejor_s": r1(self.live_delta(), 2),
+            "incidentes": ir["PlayerCarMyIncidentCount"], "en_pits": bool(ir["OnPitRoad"])}
+        fuel, per_lap, left = self._fuel_numbers()
+        per_lap = per_lap or self.fuel_per_lap_estimate()
+        snap["combustible"] = {"litros": r1(fuel), "litros_por_vuelta": r1(per_lap, 2),
+                               "alcanza_vueltas": r1(fuel / per_lap) if per_lap else None}
+        for idx, key, tag in ((ahead, "rival_adelante", "a"), (behind, "rival_atras", "b")):
+            if idx is None:
+                continue
+            gap = self._gap_to(idx)
+            laps = self.cars[idx].laps
+            snap[key] = {"numero": (self.drivers.get(idx) or {}).get("CarNumber"),
+                         "gap_s": r1(abs(gap) if gap is not None else None, 2),
+                         "se_acerca_s_por_vuelta": r1(self._gap_rate(self.gap_history.get((idx, tag), [])), 2),
+                         "ultima_vuelta_s": r1(laps[-1], 2) if laps else None,
+                         "en_pits": self.cars[idx].on_pit}
+        snap["danos"] = {"reparacion_obligatoria_s": r1(ir["PitRepairLeft"], 0),
+                         "reparacion_opcional_s": r1(ir["PitOptRepairLeft"], 0)}
+        flags = int(ir["SessionFlags"] or 0)
+        snap["banderas"] = [name for name, bit in vars(irsdk.Flags).items()
+                            if not name.startswith("_") and isinstance(bit, int) and flags & bit
+                            and name in ("yellow", "yellow_waving", "caution", "caution_waving", "blue",
+                                         "black", "repair", "white", "checkered", "debris")]
+        snap["ajustes_auto"] = {"balance_frenos": r1(ir["dcBrakeBias"]), "tc": ir["dcTractionControl"],
+                                "abs": ir["dcABS"]}
+        snap["motor"] = {"agua_c": r1(ir["WaterTemp"], 0), "aceite_c": r1(ir["OilTemp"], 0)}
+        snap["clima"] = {"pista_c": r1(ir["TrackTempCrew"], 0), "aire_c": r1(ir["AirTemp"], 0),
+                         "humedad_pista": ir["TrackWetness"]}
+        try:
+            from app.tire_model import measured, read_setup
+            data = read_setup(ir["CarSetup"] or {})
+            if measured(data):
+                snap["neumaticos_ultima_entrada_pits"] = {
+                    c: {"ext_centro_int_c": [round(x) for x in d["temps"]], "presion_caliente_kpa": d["hot"],
+                        "presion_frio_kpa": d["cold"], "camber": d["camber"]} for c, d in data.items()}
+                snap["ajustes_neumaticos_recomendados"] = self._tire_recs()
+        except Exception:
+            pass
+        recent = self.my_laps[-3:]
+        if recent:
+            snap["ultimas_vueltas"] = {
+                "derrapes": sum(l.get("slides", 0) for l in recent),
+                "patinaje_s": r1(sum(l.get("wheelspin", 0) for l in recent)),
+                "subviraje_eventos": sum(l.get("understeer", 0) for l in recent),
+                "abs_pct_frenadas": r1(100 * sum(l.get("abs_samples", 0) for l in recent)
+                                       / max(sum(l.get("brake_samples", 0) for l in recent), 1), 0)}
+        if self.seg_loss_hist:
+            worst = max(self.seg_loss_hist, key=lambda k: sum(self.seg_loss_hist[k]) /
+                        max(len(self.seg_loss_hist[k]), 1))
+            snap["donde_pierdes"] = {"zona": self.zone_name(worst).removeprefix("en "),
+                                     "s_por_vuelta": r1(sum(self.seg_loss_hist[worst]) /
+                                                        max(len(self.seg_loss_hist[worst]), 1), 2)}
+        if self.limits and self.zone_state:
+            snap["salidas_de_pista"] = {self._zone_name(z).removeprefix("en "): st["offs"]
+                                        for z in self.limits.zones
+                                        for k, st in [(self._zone_key(z), self.zone_state.get(self._zone_key(z), {}))]
+                                        if st.get("offs")}
+        if self.refs and self.refs.get("plan"):
+            snap["plan_qualy_carrera"] = self.refs["plan"]
+        if self.tire_model is not None:
+            snap["tire_targets"] = {"adelante_c": self.tire_model.target_spread("LF", self.track_name),
+                                    "atras_c": self.tire_model.target_spread("LR", self.track_name)}
+        return _drop_empty(snap)
+
     # ------------------------------------------------ grabación automática
     def _auto_recording(self):
         """Graba telemetría a disco mientras estás en el auto (sin Alt+L) y la cierra al bajarte"""
@@ -696,7 +797,16 @@ class LiveEngineer:
             except Exception as e:
                 answer = "No tengo ese dato ahora."
                 print(f"[pregunta] error: {e}", flush=True)
-            self.emit(answer, P_BATTLE + 5, ttl=20, always=True)
+            if self.claude is None or self._is_radio_command(q):
+                self.emit(answer, P_BATTLE + 5, ttl=20, always=True)
+            else:
+                try:
+                    snap = self._snapshot()
+                except Exception as e:
+                    print(f"[claude] no pude armar el resumen: {e}", flush=True)
+                    self.emit(answer, P_BATTLE + 5, ttl=20, always=True)
+                    continue
+                threading.Thread(target=self._ask_claude, args=(q, snap, answer), daemon=True).start()
 
         num = ir["SessionNum"]
         if num != self.session_num:
@@ -2045,6 +2155,14 @@ class LiveEngineer:
         # Reiniciar para medir el efecto de los cambios en la próxima salida
         self.session_handling = defaultdict(list)
         self.laps_since_setup = 0
+
+
+def _drop_empty(d):
+    """Quita valores vacíos para no gastar tokens en datos que no hay"""
+    if isinstance(d, dict):
+        out = {k: _drop_empty(v) for k, v in d.items()}
+        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+    return d
 
 
 def main():

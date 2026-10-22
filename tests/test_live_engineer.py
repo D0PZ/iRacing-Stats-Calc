@@ -297,3 +297,53 @@ def test_tire_question_without_pit_data(eng):
     eng.ask("¿cómo están las gomas?")
     tick(eng)
     assert "Entra a pits" in texts(eng)[-1]
+
+
+class FakeClaude:
+    def __init__(self, reply):
+        self.reply, self.calls = reply, []
+
+    def answer(self, question, snapshot):
+        self.calls.append((question, snapshot))
+        return self.reply
+
+
+def _wait_for(eng, n):
+    import time as _t
+    for _ in range(100):
+        if len(eng.msgs) >= n:
+            return
+        _t.sleep(0.01)
+
+
+def test_questions_go_to_claude_with_compact_snapshot(eng):
+    import json
+    tick(eng)
+    eng.claude = FakeClaude("Te alcanza justo, ahorra un poco en las rectas.")
+    eng.my_laps = [{"time": 61.0, "raw": 61.0, "fuel": 2.5}, {"time": 60.5, "raw": 60.5, "fuel": 2.5}]
+    before = len(eng.msgs)
+    eng.ask("¿llego con el combustible?")
+    tick(eng)
+    _wait_for(eng, before + 1)
+    assert texts(eng)[-1] == "Te alcanza justo, ahorra un poco en las rectas."
+    q, snap = eng.claude.calls[0]
+    assert snap["combustible"]["litros"] == 20.0 and snap["piloto"]["vueltas_restantes"] == 8
+    assert len(json.dumps(snap, ensure_ascii=False)) < 2500          # resumen compacto: pocos tokens
+
+
+def test_claude_failure_falls_back_to_local_answer(eng):
+    tick(eng)
+    eng.claude = FakeClaude(None)
+    before = len(eng.msgs)
+    eng.ask("¿cuántas vueltas faltan?")
+    tick(eng)
+    _wait_for(eng, before + 1)
+    assert "Quedan 8 vueltas" in texts(eng)[-1]
+
+
+def test_radio_commands_do_not_call_claude(eng):
+    tick(eng)
+    eng.claude = FakeClaude("no debería usarse")
+    eng.ask("silencio")
+    tick(eng)
+    assert eng.claude.calls == [] and "silencio" in texts(eng)[-1].lower()

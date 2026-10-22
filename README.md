@@ -61,6 +61,10 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - **Ask by voice** (push-to-talk on a wheel button or the Insert key): damage, fuel, pit strategy, tires,
   track limits, gaps to the car ahead/behind, laps left, lap times, where you lose time, engine temps,
   brake bias/TC/ABS, "silencio" to mute non-critical calls. Assign the wheel button with `asignar_boton.bat`
+- **Claude as interpreter (optional)**: when `ANTHROPIC_API_KEY` is set, voice questions are answered by Claude
+  (Opus 5.5, low effort) from a compact snapshot of the current state (~200-600 tokens, one call per question,
+  no history); radio commands and automatic calls stay local. Configure in `data/ingeniero.json`:
+  `"claude": {"enabled": true, "model": "claude-opus-5-5", "effort": "low"}`
 - **Track limits**: warns before zones where you exceed the limit, calls each excursion with its corner and
   praises clean full-curb exits. Zones are learned from your `.ibt` files (GPS) and from live excursions,
   stored per track in `data/track_limits/`
