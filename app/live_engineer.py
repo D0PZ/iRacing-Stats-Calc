@@ -49,7 +49,7 @@ class Message:
     expires: float = field(compare=False)
 
 
-DEFAULT_NEURAL_VOICE = "es-CL-LorenzoNeural"
+DEFAULT_NEURAL_VOICE = "es-CL-CatalinaNeural"
 
 
 class NeuralTTS:
@@ -66,6 +66,8 @@ class NeuralTTS:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.failed_until = 0.0
         self._lock = threading.Lock()
+        self._slots = threading.Semaphore(2)   # no saturar el servicio de voz con muchas frases a la vez
+        self._fails = 0
 
     def file_for(self, text: str) -> str:
         key = self._hash(f"{self.voice}|{self.rate}|{text}".encode("utf-8")).hexdigest()[:20]
@@ -84,13 +86,22 @@ class NeuralTTS:
 
         async def go():
             await edge_tts.Communicate(text, self.voice, rate=self.rate).save(part)
-        try:
-            asyncio.run(asyncio.wait_for(go(), timeout))
-            os.replace(part, path)
-            return path
-        except Exception as e:
-            print(f"[voz] Voz neuronal no disponible ({type(e).__name__}); uso la de Windows.", flush=True)
-            self.failed_until = time.time() + 60
+        with self._slots:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                return path   # otra hebra ya la generó mientras esperábamos turno
+            for attempt in (1, 2):
+                try:
+                    asyncio.run(asyncio.wait_for(go(), timeout))
+                    os.replace(part, path)
+                    self._fails = 0
+                    return path
+                except Exception as e:
+                    err = type(e).__name__
+            self._fails += 1
+            if self._fails >= 3:   # varias frases seguidas fallando: de verdad no hay servicio de voz
+                print(f"[voz] Voz neuronal no disponible ({err}); uso la de Windows por un minuto.", flush=True)
+                self.failed_until = time.time() + 60
+                self._fails = 0
             return None
 
     @staticmethod
@@ -112,7 +123,10 @@ PREWARM_PHRASES = (
     + ["Accidente justo detrás tuyo.", "Bandera amarilla en tu sector, cuidado, no adelantes.",
        "Caución, full course yellow. No adelantes.", "Bandera azul, te van a pasar, mantén tu línea.",
        "¡El de adelante se salió de pista! Aprovecha.", "El de atrás se salió, ganas aire.",
-       "Última vuelta. Dalo todo.", "¡Verde, verde, verde! Vamos.", "Motor apagado, arranca.", "Copiado."]
+       "Última vuelta. Dalo todo.", "¡Verde, verde, verde! Vamos.", "Motor apagado, arranca.", "Copiado.",
+       "¡Bandera negra! Tienes penalización, entra a pits.", "Bandera de reparación, daño obligatorio, entra a pits.",
+       "¡Limitador!", "¡Velocidad en pits, frena!", "Entrada de pits, frena y pon el limitador.",
+       "Restos en pista.", "Todavía no estoy conectado a iRacing.", "No te entendí, repite."]
 )
 
 
@@ -161,10 +175,13 @@ class Voice:
                 import win32com.client
                 pythoncom.CoInitialize()
                 speaker = win32com.client.Dispatch("SAPI.SpVoice")
-                for token in speaker.GetVoices():
-                    if "spanish" in token.GetDescription().lower():
-                        speaker.Voice = token
-                        break
+                # Respaldo de Windows: voz femenina en español (misma voz de mujer que la neuronal)
+                voices = list(speaker.GetVoices())
+                female = [t for t in voices if "spanish" in t.GetDescription().lower()
+                          and any(n in t.GetDescription().lower() for n in ("helena", "laura", "sabina", "elvira"))]
+                spanish = [t for t in voices if "spanish" in t.GetDescription().lower()]
+                if female or spanish:
+                    speaker.Voice = (female or spanish)[0]
                 speaker.Rate = self.rate
             except Exception as e:
                 print(f"[voz] No se pudo iniciar SAPI ({e}); solo texto.")
@@ -177,15 +194,13 @@ class Voice:
             if time.time() > msg.expires:
                 continue  # Mensaje viejo, ya no sirve
             if self.neural is not None:
-                # Si la síntesis en paralelo ya está en curso, esperarla un momento en vez de repetirla
+                # Si la síntesis en paralelo ya está en curso, esperarla un momento en vez de repetirla.
+                # Misma voz siempre: la de Windows solo si el servicio de voz neuronal no responde.
                 for _ in range(40):
-                    if os.path.exists(self.neural.file_for(msg.text)) or msg.priority >= P_SAFETY:
+                    if os.path.exists(self.neural.file_for(msg.text)):
                         break
                     time.sleep(0.05)
-                cached = os.path.exists(self.neural.file_for(msg.text))
-                # Una urgencia no espera 1.5 s a la voz neuronal: si no está en caché, voz de Windows ya
-                urgent_uncached = msg.priority >= P_SAFETY and not cached and speaker is not None
-                path = None if urgent_uncached else self.neural.synth(msg.text)
+                path = self.neural.synth(msg.text)
                 if path and time.time() <= msg.expires:
                     try:
                         self.neural.play(path)
@@ -1584,10 +1599,10 @@ class LiveEngineer:
             if not limiter and v > limit * 0.6:
                 self.emit("¡Limitador!", P_SAFETY, key="limiter", cooldown=4, ttl=2)
             if v > limit + 0.5:
-                self.emit(f"¡Velocidad en pits! {v:.0f}, el límite es {limit:.0f}.", P_SAFETY,
+                self.emit("¡Velocidad en pits, frena!", P_SAFETY,
                           key="pitspeed", cooldown=3, ttl=2)
         elif surface == 2 and not limiter and v > limit + 20:  # aproximándose a la entrada de pits
-            self.emit(f"Entrada de pits, frena a {limit:.0f} y limitador.", P_SAFETY, key="pitentry",
+            self.emit("Entrada de pits, frena y pon el limitador.", P_SAFETY, key="pitentry",
                       cooldown=20, ttl=3)
 
     # --------------------------------------------------------------- clima

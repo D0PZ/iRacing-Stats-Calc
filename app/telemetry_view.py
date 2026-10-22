@@ -14,8 +14,8 @@ from app.ibt_reader import telemetry_dir
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
 
 PRIORITY_LABEL = {1: "ALTA", 2: "MEDIA", 3: "INFO"}
-DEFAULT_VOICE = "es-CL-LorenzoNeural"
-VOICES = [DEFAULT_VOICE, "es-CL-CatalinaNeural", "es-AR-TomasNeural", "es-AR-ElenaNeural",
+DEFAULT_VOICE = "es-CL-CatalinaNeural"
+VOICES = [DEFAULT_VOICE, "es-CL-LorenzoNeural", "es-AR-TomasNeural", "es-AR-ElenaNeural",
           "es-MX-JorgeNeural", "es-MX-DaliaNeural", "es-ES-AlvaroNeural", "es-CO-GonzaloNeural",
           "es-US-AlonsoNeural"]
 
