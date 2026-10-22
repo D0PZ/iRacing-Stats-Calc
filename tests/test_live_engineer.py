@@ -59,6 +59,8 @@ class FakeIR:
 
 @pytest.fixture
 def eng(monkeypatch, tmp_path):
+    import app.tire_model as tm
+    monkeypatch.setattr(tm, "BASE", str(tmp_path / "tire_model"))    # no tocar data/ del repo
     # No leer ni escribir los mapas de límites guardados en data/
     monkeypatch.setattr(le, "load_tracker", lambda name, length: TrackLimitTracker(length))
     monkeypatch.setattr(le, "save_tracker", lambda *a, **k: None)
@@ -275,16 +277,19 @@ def test_tire_question_uses_pit_measurements(eng):
         eng.ir.v.update({f"{c}tempCL": l, f"{c}tempCM": m, f"{c}tempCR": r, f"{c}coldPressure": 182.7,
                          f"{c}wearL": 0.95, f"{c}wearM": 0.95, f"{c}wearR": 0.97})
     eng.ir.v["CarSetup"] = {"Tires": {
-        "LeftFront": {"LastHotPressure": "193 kPa", "LastTempsOMI": "65C, 76C, 78C"},
-        "RightFront": {"LastHotPressure": "190 kPa", "LastTempsIMO": "72C, 69C, 59C"},
-        "LeftRear": {"LastHotPressure": "183 kPa", "LastTempsOMI": "67C, 72C, 76C"},
-        "RightRear": {"LastHotPressure": "182 kPa", "LastTempsIMO": "75C, 72C, 66C"}}}
+        "LeftFront": {"StartingPressure": "183 kPa", "LastHotPressure": "193 kPa", "LastTempsOMI": "65C, 76C, 78C"},
+        "RightFront": {"StartingPressure": "183 kPa", "LastHotPressure": "190 kPa", "LastTempsIMO": "72C, 69C, 59C"},
+        "LeftRear": {"StartingPressure": "179 kPa", "LastHotPressure": "183 kPa", "LastTempsOMI": "67C, 72C, 76C"},
+        "RightRear": {"StartingPressure": "179 kPa", "LastHotPressure": "182 kPa", "LastTempsIMO": "75C, 72C, 66C"}},
+        "Chassis": {w: {"Camber": "-3.0 deg"} for w in ("LeftFront", "RightFront", "LeftRear", "RightRear")}}
     eng.ask("temperatura de neumáticos")
     tick(eng)
     out = texts(eng)[-1]
     assert "delantera izquierda 65, 76 y 78" in out
     assert "193 y 190 adelante" in out
-    assert "Camber delantero" in out
+    assert "Delantera izquierda: camber de -3.0 a -2.6" in out     # 13 °C vs objetivo 7
+    assert "presión de 183 a 175" in out                           # centro +4.5: tope de 8 kPa por salida
+    assert "Trasera izquierda: camber de -3.0 a -2.7" in out       # 9 °C vs objetivo 5
 
 
 def test_tire_question_without_pit_data(eng):

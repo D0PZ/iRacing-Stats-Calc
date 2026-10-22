@@ -228,6 +228,7 @@ class LiveEngineer:
         self.muted_until = 0.0
         self.last_spoken = ""
         self.on_track = False
+        self.tire_model = None
         self.auto_record = auto_record
         self._we_record = False          # la grabación la inició el ingeniero
         self._off_track_since: Optional[float] = None
@@ -1835,11 +1836,11 @@ class LiveEngineer:
                     "Entra a pits y te digo temperaturas, presiones y qué ajustar.")
         msg = ". ".join(p[0].upper() + p[1:] for p in parts) + "."
         try:
-            recs = self._tire_analysis(ir["CarSetup"] or {})
+            recs = self._tire_recs()
         except Exception:
             recs = []
         if recs:
-            msg += " Recomendación: " + " ".join(recs[:2])
+            msg += " " + " ".join(recs)
         elif temps and parts:
             msg += " Camber y presiones se ven bien."
         recent = self.my_laps[-3:]
@@ -1848,6 +1849,29 @@ class LiveEngineer:
         if recent and (slides > 6 or spin > 4):
             msg += f" Ojo: {slides} derrapes y {spin:.1f} segundos patinando en las últimas vueltas, cuídalas."
         return msg
+
+    def _tire_recs(self, record_laps: Optional[List[float]] = None) -> List[str]:
+        """
+        Ajustes exactos de camber y presión por rueda hacia el contacto perfecto.
+        record_laps: tiempos de la salida que acaba de terminar (para buscar tu óptimo).
+        """
+        from app.tire_model import TireModel, measured, read_setup
+        from app.voice_commands import load_config
+        data = read_setup(self.ir["CarSetup"] or {})
+        if not measured(data):
+            return []
+        car = self.car_name or "auto"
+        if self.tire_model is None or self.tire_model.car != car:
+            self.tire_model = TireModel(car, load_config().get("tire_targets"))
+        m = self.tire_model
+        if record_laps is not None:
+            m.learn(data)
+            m.record_stint(data, record_laps, self.track_name)
+        out = m.phrases(m.recommend(data, self.track_name))
+        front, rear = m.target_spread("LF", self.track_name), m.target_spread("LR", self.track_name)
+        out.append(f"Objetivo interior sobre exterior: {front:.1f} grados adelante y {rear:.1f} atrás, "
+                   f"{m.target_source('front_spread', self.track_name)}.")
+        return out
 
     def _rival_answer(self, idx: int, where: str) -> str:
         gap = self._gap_to(idx)
@@ -1877,7 +1901,7 @@ class LiveEngineer:
     def _check_setup_report(self):
         ir = self.ir
         in_box = bool(ir["PlayerCarInPitStall"]) or not ir["IsOnTrack"]
-        if in_box and not self.prev_in_stall and self.laps_since_setup >= 2:
+        if in_box and not self.prev_in_stall and self.laps_since_setup >= 3:
             try:
                 self._setup_report()
             except Exception as e:
@@ -1976,12 +2000,15 @@ class LiveEngineer:
             recs.append(f"Sobreviraje y patinaje en la salida ({zone(h['exit_slides'] or h['spin_pcts'])}): control de tracción "
                         f"más un clic, barra trasera más blanda, menos precarga del diferencial o más ala trasera.")
         self._temps_line = ""
+        stint_laps = [l["time"] for l in self.my_laps[-self.laps_since_setup:] if l["time"] > 0]
         try:
-            recs += self._tire_analysis(self.ir["CarSetup"] or {})
+            tire = self._tire_recs(record_laps=stint_laps)
         except Exception as e:
+            tire = []
             print(f"[setup] sin datos de neumáticos: {e}", flush=True)
         if not recs:
-            recs.append("El auto se ve equilibrado en estas vueltas. Sigue así y enfócate en la consistencia.")
+            recs.append("El auto se ve equilibrado en estas vueltas.")
+        recs = recs[:2] + tire
 
         # Reporte completo en archivo
         import os
@@ -2001,7 +2028,7 @@ class LiveEngineer:
                 f.write(f"  {' > '.join(p_)}: {v}\n")
         print(f"[setup] reporte guardado en {path}", flush=True)
 
-        self.emit(f"Reporte de setup de {laps} vueltas. " + " ".join(recs[:3]), P_INFO, ttl=60)
+        self.emit(f"Reporte de setup de {laps} vueltas. " + " ".join(recs), P_INFO, ttl=90)
         # Reiniciar para medir el efecto de los cambios en la próxima salida
         self.session_handling = defaultdict(list)
         self.laps_since_setup = 0
