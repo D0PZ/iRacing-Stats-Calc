@@ -69,6 +69,10 @@ class CornerResult:
     brake_peak_avg: float = 0.0
     throttle_m_best: Optional[float] = None  # metros después del vértice hasta ir a fondo (mejor paso)
     throttle_m_avg: Optional[float] = None
+    brake_efficiency: Optional[float] = None   # distancia mínima física / distancia real (mejor paso)
+    brake_potential_m: float = 0.0            # metros que podrías frenar más tarde (al 90 % de eficiencia)
+    brake_gain_s: float = 0.0
+    grip_usage: Optional[float] = None         # uso medio del agarre demostrado a esa velocidad
 
 
 @dataclass
@@ -87,6 +91,7 @@ class AnalysisResult:
     fuel_per_lap: float = 0.0
     setup: Dict[str, str] = field(default_factory=dict)
     limit_zones: List[dict] = field(default_factory=list)
+    gradients: Dict[str, dict] = field(default_factory=dict)   # K por banda de velocidad
     plan_lines: List[str] = field(default_factory=list)       # plan de qualy y carrera
     pad_plan: Optional[dict] = None
     brake_profile: Optional[dict] = None
@@ -250,6 +255,10 @@ class TelemetryAnalyzer:
 
         apexes = self._detect_corners(best["Speed"], step)
         self._analyze_corners(apexes, data, grid, step)
+        try:
+            self._physics(data, grid, step, apexes, valid)
+        except Exception as e:
+            print(f"[física] no se pudo calcular: {e}")
         self._tires(valid)
         try:
             self._track_limits(valid)
@@ -418,6 +427,72 @@ class TelemetryAnalyzer:
             gain += seg_best_lap - seg_min
         res.theoretical_best = res.best_lap.time - gain
 
+    # ------------------------------------------------------------- física
+    def _physics(self, data, grid, step, apexes, valid):
+        from app import vehicle_dynamics as vd
+        res = self.result
+        cat = lambda k: np.concatenate([d[k] for d in data.values()])          # noqa: E731
+        v, ax, ay, brk = cat("Speed"), cat("LongAccel"), cat("LatAccel"), cat("Brake")
+        env_v, env_a = vd.braking_envelope(v, ax, brk)
+        gg_v, gg_g = vd.gg_envelope(v, ax, ay)
+        lat_env = vd.lateral_envelope(v, ay)
+        # K por banda con las muestras crudas (más resolución que la grilla por metro)
+        raw = {k: [] for k in ("Speed", "SteeringWheelAngle", "YawRate", "LatAccel", "LongAccel")}
+        for l in valid:
+            f = self.files[l.file_idx]
+            for k in raw:
+                a = f.get(k)
+                if a is not None:
+                    raw[k].append(a[l.i0:l.i1].astype(float))
+        if all(raw.values()):
+            res.gradients = vd.understeer_by_band(*(np.concatenate(raw[k]) for k in raw))
+        n = len(grid)
+        for c, apex in zip(res.corners, apexes):
+            d = data[c.best_time_lap]
+            if c.brake_m_best and c.brake_m_best > 10 and c.brake_peak_best >= 30:   # no en toques de freno
+                # Ventana desde 300 m antes del vértice, sobre la trayectoria real de tu mejor paso
+                back = int(min(300, c.brake_m_best + 150) / step)
+                idx = np.arange(apex - back, apex + 1) % n
+                b_idx = back - int(c.brake_m_best / step)
+                pot = vd.braking_potential(d["Speed"][idx], d["YawRate"][idx], b_idx, back, step,
+                                           (env_v, env_a), lat_env)
+                if pot:
+                    c.brake_potential_m = max(0.0, pot["meters_later"])
+                    c.brake_gain_s = pot["gain_s"] if pot["meters_later"] > 0 else 0.0
+                    real = c.brake_m_best
+                    c.brake_efficiency = round(max(0.0, min(1.0, (real - c.brake_potential_m) / real)), 2)
+            idx = np.arange(apex - int(80 / step), apex + int(80 / step)) % n
+            c.grip_usage = round(vd.grip_usage(d["Speed"][idx], d["LongAccel"][idx], d["LatAccel"][idx],
+                                               gg_v, gg_g), 2)
+        self._physics_recs()
+
+    def _physics_recs(self):
+        from app.balance_model import TARGET_K, describe_k
+        R, res = self.result.recommendations, self.result
+        brakes = sorted([c for c in res.corners if c.brake_gain_s >= 0.05], key=lambda c: -c.brake_gain_s)[:3]
+        if brakes:
+            parts = [f"C{c.number}: {c.brake_potential_m:.0f} m más tarde, hasta {c.brake_gain_s:.2f} s" for c in brakes]
+            R.append(Recommendation(
+                "Pilotaje", 1, "Puedes frenar más tarde (cálculo físico)",
+                "Modelo físico sobre tu trayectoria (elipse de fricción con el 90 % de tu agarre demostrado, "
+                "hasta tu misma velocidad de vértice): " + "; ".join(parts) + ". La ganancia es frenar más tarde y, "
+                "sobre todo, soltar el freno de forma progresiva llevando más velocidad durante la frenada."))
+        low = sorted([c for c in res.corners if c.grip_usage and c.grip_usage < 0.8], key=lambda c: c.grip_usage)[:3]
+        if low:
+            R.append(Recommendation(
+                "Pilotaje", 2, "Agarre sin usar en curva",
+                "Uso del agarre que ya demostraste a esa velocidad: " + "; ".join(
+                    f"C{c.number} {c.grip_usage * 100:.0f} %" for c in low)
+                + ". Ahí puedes llevar más velocidad al vértice o acelerar antes."))
+        for band, name, tool in (("lenta", "curvas lentas", "barras"), ("rapida", "curvas rápidas", "alerón")):
+            g = res.gradients.get(band)
+            if g and abs(g["K"] - TARGET_K[band]) > 0.3:
+                R.append(Recommendation(
+                    "Setup", 2, f"Balance en {name}: {describe_k(g['K'])}",
+                    f"Gradiente de subviraje K = {g['K']:+.2f} grados por g (objetivo {TARGET_K[band]:+.1f}); se corrige "
+                    f"con {tool}. Pregúntale a la ingeniera por los clics exactos: los calcula con lo que aprende de "
+                    f"tus salidas."))
+
     # ---------------------------------------------------- límites de pista
     def _corner_name(self, s: float) -> str:
         if not self.result.corners:
@@ -565,6 +640,9 @@ class TelemetryAnalyzer:
         res.pad_plan = sp.pad_plan(res.brake_profile, mu_f, mu_r, bias, options) if options else None
         fuel = {}
         if res.fuel_per_lap:
+            from app.vehicle_dynamics import fuel_seconds_per_liter
+            if res.best_lap:
+                fuel["s_per_liter"] = fuel_seconds_per_liter(res.best_lap.time)
             q_laps = sp.session_laps(self.info, "qual") or 2
             fuel.update(qualy=sp.qualy_fuel(res.fuel_per_lap, q_laps), qualy_laps=q_laps)
             r_laps = sp.session_laps(self.info, "race")
@@ -833,6 +911,17 @@ def format_report(res: AnalysisResult) -> str:
             if c.throttle_m_best is not None:
                 parts.append(f"a fondo {c.throttle_m_best:.0f} m después")
             lines.append(" · ".join(parts))
+        lines.append("")
+    if res.gradients or any(c.brake_efficiency for c in res.corners):
+        lines.append("FÍSICA")
+        for band, g in res.gradients.items():
+            lines.append(f"  Gradiente de subviraje curvas {band}: K {g['K']:+.2f} °/g (n={g['n']}, ruido {g['ruido']}°)")
+        for c in res.corners:
+            if c.brake_efficiency or c.grip_usage:
+                be = f"frenada {c.brake_efficiency * 100:3.0f} % (+{c.brake_potential_m:.0f} m posible)" \
+                    if c.brake_efficiency else "sin frenada"
+                gu = f"agarre usado {c.grip_usage * 100:.0f} %" if c.grip_usage == c.grip_usage else ""
+                lines.append(f"  C{c.number:<2} {be}  {gu}")
         lines.append("")
     if res.plan_lines:
         lines.append("PLAN QUALY / CARRERA")

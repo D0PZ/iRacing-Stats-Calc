@@ -419,6 +419,8 @@ class LiveEngineer:
         self.laps_since_summary = 0
         self.session_handling: Dict[str, List[float]] = defaultdict(list)
         self.side_counts: Dict[str, int] = {}
+        from app.vehicle_dynamics import GradientAccumulator
+        self.k_acc = GradientAccumulator()
         self.laps_since_setup = 0
         self.prev_in_stall = False
         # Tiempo real
@@ -783,6 +785,12 @@ class LiveEngineer:
                                         if st.get("offs")}
         if self.refs and self.refs.get("plan"):
             snap["plan_qualy_carrera"] = self.refs["plan"]
+        if self.refs and self.refs.get("corners"):
+            pot = [{"curva": c["n"], "frenar_mas_tarde_m": c["frenar_mas_tarde_m"], "ganancia_s": c["ganancia_s"],
+                    "agarre_usado": c.get("agarre_usado")}
+                   for c in self.refs["corners"] if (c.get("ganancia_s") or 0) >= 0.05]
+            if pot:
+                snap["potencial_por_curva_calculo_fisico"] = pot
         try:
             from app.setup_db import flatten_setup, key_setup
             snap["setup_actual"] = key_setup(flatten_setup(ir["CarSetup"] or {}))
@@ -797,6 +805,11 @@ class LiveEngineer:
                 snap["ajustes_toe_recomendados"] = toe
             if self.side_counts:
                 snap["eventos_por_sentido_y_velocidad"] = dict(self.side_counts)
+            K = self.k_acc.result()
+            if K:
+                from app.balance_model import describe_k
+                snap["balance_gradiente_subviraje"] = {b: {"K_grados_por_g": g["K"], "lectura": describe_k(g["K"]),
+                                                           "muestras": g["n"]} for b, g in K.items()}
         except Exception:
             pass
         if self.setup_db is not None and self.setup_db.stints:
@@ -828,6 +841,7 @@ class LiveEngineer:
         handling = {k: round(v, 2) for k, v in per_lap_events.items()}
         handling["patinaje_s_por_vuelta"] = round(spin, 2)
         handling["por_sentido"] = dict(self.side_counts)
+        handling["gradiente"] = self.k_acc.result()
         rec = self.setup_db.add_stint(ir["CarSetup"] or {}, stint_laps, session=session,
                                       track_temp=ir["TrackTempCrew"], air_temp=ir["AirTemp"], handling=handling,
                                       fuel_per_lap=round(sum(fuel) / len(fuel), 3) if fuel else None,
@@ -858,8 +872,20 @@ class LiveEngineer:
         laps = laps or max(self.laps_since_setup, 1)
         history = self.setup_db.stints if self.setup_db is not None else None
         sens = learn_cross_sens(self.setup_db.cross_points) if self.setup_db is not None else None
-        return phrases(advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history,
-                              cross_sens=sens))
+        flat = flatten_setup(self.ir["CarSetup"] or {})
+        recs = advise(flat, laps, self.side_counts, history, cross_sens=sens)
+        from app import balance_model
+        K = self.k_acc.result()
+        physics = balance_model.recommend(flat, K, history)
+        # Donde hay K medido con suficientes muestras, la física manda sobre el conteo de eventos
+        measured = {b for b, g in K.items() if g.get("n", 0) >= balance_model.MIN_SAMPLES}
+        replaced = set()
+        if "lenta" in measured:
+            replaced |= {"Barra delantera", "Barra trasera"}
+        if "rapida" in measured:
+            replaced.add("Alerón")
+        recs = [r for r in recs if r["param"] not in replaced]
+        return balance_model.phrases(physics) + phrases(recs)
 
     def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
         """Toe por rueda según cómo se comportó el auto (por sentido de curva) y tu historial"""
@@ -1358,6 +1384,8 @@ class LiveEngineer:
 
         pct = ir["LapDistPct"]
         self._record_profile(pct, v)
+        if not ir["OnPitRoad"] and ir["PlayerTrackSurface"] == 3:
+            self.k_acc.add(v, steer, yaw, ir["LatAccel"] or 0.0, ir["LongAccel"] or 0.0)
         if brk > 0.1 and not self._brake_on and v > 20:
             self._brake_on = True
             dist = ir["LapDist"]
@@ -1971,7 +1999,11 @@ class LiveEngineer:
                      f"pasa a {c['min_kmh']:.0f} kilómetros por hora en {c['gear']}a"]
             if c.get("throttle_m") is not None:
                 parts.append(f"y a fondo {c['throttle_m']:.0f} metros después del vértice")
-            return ", ".join(parts) + "."
+            msg = ", ".join(parts) + "."
+            if (c.get("frenar_mas_tarde_m") or 0) >= 4 and (c.get("ganancia_s") or 0) >= 0.03:
+                msg += (f" Según el cálculo físico puedes frenar unos {c['frenar_mas_tarde_m']:.0f} metros más tarde y "
+                        f"soltar progresivo: hasta {c['ganancia_s']:.2f} segundos.")
+            return msg
         ref = self.best_lap_brakes.get(k)
         if ref is not None:
             return f"En tu mejor vuelta frenaste para la curva {n} en el metro {ref:.0f}."
@@ -2476,6 +2508,7 @@ class LiveEngineer:
         # Reiniciar para medir el efecto de los cambios en la próxima salida
         self.session_handling = defaultdict(list)
         self.side_counts = {}
+        self.k_acc.reset()
         self.laps_since_setup = 0
 
 

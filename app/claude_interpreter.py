@@ -49,6 +49,9 @@ Reglas:
   cross weight. Nunca corrijas el cross weight con una sola rueda: se hace en diagonal con las 4 ruedas, la misma
   cantidad (delantera izquierda y trasera derecha en un sentido, delantera derecha y trasera izquierda en el otro)
   para no cambiar la altura de cada eje. Da los valores exactos de ajustes_chasis_recomendados.
+- balance_gradiente_subviraje: K en grados por g medido en esta salida por velocidad de curva (lenta < 100,
+  media, rapida > 160 km/h). K > 0 subviraje, K < 0 sobreviraje. Objetivo +0.2 en lentas (barras) y +0.4 en
+  rápidas (alerón). Barra delantera más dura sube K, trasera más dura lo baja, más alerón sube K en rápidas.
 - Chasis: usa ajustes_chasis_recomendados si vienen. Barras = balance en curvas lentas/medias; alerón = balance
   en curvas rápidas y velocidad punta; spring perch = cross weight (simetría izquierda/derecha) y rake.
 - eventos_por_sentido_y_velocidad cuenta derrapes y subviraje por sentido (izq/der) y por velocidad de curva

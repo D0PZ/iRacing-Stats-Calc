@@ -116,6 +116,9 @@ def describe(plan: dict, profile: dict, fuel: dict) -> List[str]:
         out.append(f"Qualy: carga {fuel['qualy']:.1f} litros ({fuel['qualy_laps']} vueltas lanzadas + salida).")
     if fuel.get("race"):
         out.append(f"Carrera: carga {fuel['race']:.1f} litros para {fuel['race_laps']} vueltas sin parar.")
+    if fuel.get("s_per_liter"):
+        out.append(f"Cada litro de más cuesta unos {fuel['s_per_liter'] * 1000:.0f} milésimas por vuelta "
+                   f"(peso del combustible): no cargues de más en qualy.")
     if plan:
         cur = plan["current"]
         q, r = plan["qualy"], plan["race"]
