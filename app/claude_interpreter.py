@@ -43,8 +43,11 @@ Reglas:
   historial: úsalos cuando pregunten por presiones, camber o setup ideal aunque en esta sesión no haya mediciones.
 - setup_actual es el setup cargado ahora mismo (toe, barras, ala, presiones, camber, pastillas, etc.).
 - Toe: usa ajustes_toe_recomendados si vienen. Toe-in trasero = estabilidad, menos rotación y velocidad punta;
-  la trasera exterior estabiliza cada curva (a la derecha trabaja la izquierda). eventos_por_sentido_de_curva
-  separa derrapes y subviraje en curvas a la izquierda (izq) y a la derecha (der)."""
+  la trasera exterior estabiliza cada curva (a la derecha trabaja la izquierda).
+- Chasis: usa ajustes_chasis_recomendados si vienen. Barras = balance en curvas lentas/medias; alerón = balance
+  en curvas rápidas y velocidad punta; spring perch = cross weight (simetría izquierda/derecha) y rake.
+- eventos_por_sentido_y_velocidad cuenta derrapes y subviraje por sentido (izq/der) y por velocidad de curva
+  (lenta < 100, media < 160, rapida). Entry = frenando, mid = en apoyo, exit = acelerando."""
 
 
 def credentials_available() -> bool:

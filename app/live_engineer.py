@@ -789,11 +789,14 @@ class LiveEngineer:
         except Exception:
             pass
         try:
+            chassis = self._chassis_recs()
+            if chassis:
+                snap["ajustes_chasis_recomendados"] = chassis
             toe = self._toe_recs()
             if toe:
                 snap["ajustes_toe_recomendados"] = toe
             if self.side_counts:
-                snap["eventos_por_sentido_de_curva"] = dict(self.side_counts)
+                snap["eventos_por_sentido_y_velocidad"] = dict(self.side_counts)
         except Exception:
             pass
         if self.setup_db is not None and self.setup_db.stints:
@@ -833,6 +836,14 @@ class LiveEngineer:
         print(f"[setups] salida guardada ({rec['vueltas']} vueltas, "
               f"{'con' if rec['medicion'] else 'sin'} temperaturas) -> {len(self.setup_db.stints)} en total",
               flush=True)
+
+    def _chassis_recs(self, laps: Optional[int] = None) -> List[str]:
+        """Barras, alerón y spring perch según dónde (velocidad y sentido de curva) aparece el problema"""
+        from app.chassis_advisor import advise, phrases
+        from app.setup_db import flatten_setup
+        laps = laps or max(self.laps_since_setup, 1)
+        history = self.setup_db.stints if self.setup_db is not None else None
+        return phrases(advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history))
 
     def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
         """Toe por rueda según cómo se comportó el auto (por sentido de curva) y tu historial"""
@@ -1301,6 +1312,14 @@ class LiveEngineer:
                 self.emit("¡Verde, verde, verde!", P_FLAG)
         self.prev_state = state
 
+    @staticmethod
+    def _count(st: dict, kind: str, side: str, v: float):
+        """Cuenta el evento por sentido de curva y por velocidad (lenta < 100, media < 160, rápida)"""
+        kmh = v * 3.6
+        bucket = "lenta" if kmh < 100 else "media" if kmh < 160 else "rapida"
+        for key in (f"{kind}_{side}", f"{kind}_{bucket}"):
+            st["by_side"][key] = st["by_side"].get(key, 0) + 1
+
     # ---------------------------------------------------- driver dynamics
     def _driver_dynamics(self):
         ir = self.ir
@@ -1350,10 +1369,10 @@ class LiveEngineer:
                 side = "izq" if yaw * sign > 0 else "der"   # sentido de la curva (el auto gira hacia ahí)
                 if brk > 0.15:
                     st["entry_slides"].append(pct)
-                    st["by_side"][f"entry_slides_{side}"] = st["by_side"].get(f"entry_slides_{side}", 0) + 1
+                    self._count(st, "entry_slides", side, v)
                 elif thr > 0.4:
                     st["exit_slides"].append(pct)
-                    st["by_side"][f"exit_slides_{side}"] = st["by_side"].get(f"exit_slides_{side}", 0) + 1
+                    self._count(st, "exit_slides", side, v)
                 if thr > 0.5:
                     self.emit("Cuidado con el acelerador en la salida, se te va la cola.",
                               P_CAR, key="exit_slide", cooldown=40, ttl=4)
@@ -1374,8 +1393,7 @@ class LiveEngineer:
                     st["understeer"] += 1
                     kind = "entry_under" if brk > 0.1 else "mid_under"
                     st[kind].append(pct)
-                    side = "izq" if yaw * sign > 0 else "der"
-                    st["by_side"][f"{kind}_{side}"] = st["by_side"].get(f"{kind}_{side}", 0) + 1
+                    self._count(st, kind, "izq" if yaw * sign > 0 else "der", v)
             else:
                 self.under_timer = 0.0
 
@@ -2052,6 +2070,17 @@ class LiveEngineer:
             names = ", ".join(self._zone_name(z).removeprefix("en ") for z in self.limits.zones[:4])
             return f"Ninguna salida esta sesión. Zonas con límite estricto: {names}."
 
+        if has("barra", "arb", "estabilizadora", "aleron", "wing", "perch", "cross", "altura", "rake"):
+            recs = self._chassis_recs()
+            if recs:
+                return " ".join(recs)
+            from app.chassis_advisor import read_chassis
+            from app.setup_db import flatten_setup
+            c = read_chassis(flatten_setup(ir["CarSetup"] or {}))
+            return (f"No cambiaría barras ni alerón todavía (barra delantera {c.get('arb_front')}, trasera "
+                    f"{c.get('arb_rear')}, alerón {c.get('wing')}, cross weight {c.get('cross')}): no veo una tendencia "
+                    f"clara. Dame unas vueltas más al límite.")
+
         if has("toe", "convergencia", "divergencia"):
             recs = self._toe_recs()
             if recs:
@@ -2403,7 +2432,8 @@ class LiveEngineer:
         if not recs:
             recs.append("El auto se ve equilibrado en estas vueltas.")
         toe = self._toe_recs(laps)
-        recs = recs[:2] + tire + toe
+        chassis = self._chassis_recs(laps)
+        recs = (chassis or recs[:2]) + tire + toe
         self._store_stint(stint_laps, per, spin, recs)
 
         # Reporte completo en archivo
