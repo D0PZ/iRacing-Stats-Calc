@@ -14,11 +14,11 @@ def test_softest_pad_that_still_reaches_abs_in_hard_stops():
     # Frenadas fuertes llegan al ABS con 60% de pedal, máximo real 90%: hay margen para pastillas más suaves
     prof = {"onset_p50": 0.37, "hard_p90": 0.60, "pedal_max": 0.90, "abs_share": 0.8}
     plan = sp.pad_plan(prof, 0.58, 0.42, 0.49, OPTS)
-    assert plan["race"]["mu"] == 0.48                    # 0.60*0.58/0.48 = 0.725 <= 0.855
-    assert plan["qualy"]["mu"] == 0.51
+    assert plan["race"]["mu"] == 0.44                    # 0.60*0.58/0.44 = 0.79 <= 0.90*0.95
+    assert plan["qualy"]["mu"] == 0.48
     # el balance se compensa para mantener el reparto de frenada
     share = lambda mu, b: b * mu / (b * mu + (1 - b) * 0.42)
-    assert share(0.48, plan["race"]["bias"]) == pytest.approx(plan["share"], abs=1e-6)
+    assert share(0.44, plan["race"]["bias"]) == pytest.approx(plan["share"], abs=1e-6)
 
 
 def test_keeps_pad_when_already_at_pedal_limit():
