@@ -7,6 +7,8 @@ desgaste/deslizamiento de neumáticos, uso del ABS, combustible, etc.
 
 import math
 import os
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import queue
 import re
 import threading
@@ -127,6 +129,26 @@ class NeuralTTS:
 
 # Frases urgentes que conviene tener sintetizadas de antemano (latencia cero)
 URGENT_RATE = "+30%"     # llamadas urgentes: más rápidas
+# Salida de audio de la radio: siempre los audífonos (configurable en data/ingeniero.json -> "audio_output")
+DEFAULT_OUTPUTS = ["Auriculares", "Realtek(R) Audio"]
+
+
+def pick_output_device(preferences: Optional[List[str]] = None) -> Optional[str]:
+    """Primer dispositivo de salida cuyo nombre contiene alguna preferencia (en orden); None = el de Windows"""
+    try:
+        os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+        import pygame
+        import pygame._sdl2.audio as sdl_audio
+        if not pygame.get_init():
+            pygame.init()
+        names = sdl_audio.get_audio_device_names(False)
+    except Exception:
+        return None
+    for pref in preferences or DEFAULT_OUTPUTS:
+        for name in names:
+            if pref.lower() in name.lower() and "digital output" not in name.lower():
+                return name
+    return None
 # Frases urgentes pre-sintetizadas (latencia cero, misma voz). Se generan con URGENT_RATE.
 PREWARM_URGENT = (
     [f"¡Auto parado a {d}!" for d in range(100, 800, 100)]
@@ -143,13 +165,24 @@ PREWARM_NORMAL = ["Todavía no estoy conectado a iRacing.", "No te entendí, rep
 class Voice:
     """Cola de mensajes hablados: voz neuronal si hay internet, si no SAPI de Windows"""
 
-    def __init__(self, enabled: bool = True, rate: int = 2, neural_voice: Optional[str] = DEFAULT_NEURAL_VOICE):
+    def __init__(self, enabled: bool = True, rate: int = 2, neural_voice: Optional[str] = DEFAULT_NEURAL_VOICE,
+                 outputs: Optional[List[str]] = None):
         self.enabled = enabled
         self.rate = rate
+        self.outputs = outputs or DEFAULT_OUTPUTS
+        self.device: Optional[str] = None
+        self._mixer_ready = False
         self.neural: Optional[NeuralTTS] = None
         self.q: "queue.PriorityQueue[Message]" = queue.PriorityQueue()
         self._stop = threading.Event()
         self._urgent = threading.Event()   # corta lo que se esté diciendo si llega un peligro
+        if enabled:
+            # Abrir la salida (audífonos) aquí y no en el hilo de voz: allí la voz de Windows inicializa COM
+            # de una forma que impide al reproductor ver los dispositivos y caería al predeterminado
+            try:
+                self._init_mixer()
+            except Exception as e:
+                print(f"[voz] no pude abrir la salida de audio ({e})", flush=True)
         if enabled and neural_voice:
             try:
                 self.neural = NeuralTTS(neural_voice)
@@ -158,6 +191,44 @@ class Voice:
                 print("[voz] Para voz humana instala edge-tts: pip install edge-tts", flush=True)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _init_mixer(self):
+        """Reproductor en el dispositivo elegido (audífonos); si no está, el predeterminado de Windows"""
+        import pygame
+        try:
+            pygame.mixer.quit()
+        except Exception:
+            pass
+        self.device = pick_output_device(self.outputs)
+        try:
+            pygame.mixer.init(frequency=24000, channels=1, devicename=self.device) if self.device \
+                else pygame.mixer.init(frequency=24000, channels=1)
+            self._mixer_ready = True
+            print(f"[voz] salida de audio: {self.device or 'predeterminada de Windows'}", flush=True)
+        except Exception as e:
+            print(f"[voz] no pude abrir {self.device} ({e}); uso la salida predeterminada", flush=True)
+            self.device = None
+            pygame.mixer.init(frequency=24000, channels=1)
+            self._mixer_ready = True
+
+    def _play(self, path: str, interrupt: Optional[threading.Event] = None):
+        """Reproduce el mp3 en los audífonos; se corta si llega una urgencia"""
+        import pygame
+        if not self._mixer_ready:
+            self._init_mixer()
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+        except Exception:
+            self._init_mixer()   # se desconectó el dispositivo: reabrir (cae al predeterminado si no está)
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            if interrupt is not None and interrupt.is_set():
+                pygame.mixer.music.stop()
+                break
+            time.sleep(0.02)
+        pygame.mixer.music.unload()
 
     @staticmethod
     def rate_for(priority: int) -> Optional[str]:
@@ -203,6 +274,11 @@ class Voice:
                 spanish = [t for t in voices if "spanish" in t.GetDescription().lower()]
                 if female or spanish:
                     speaker.Voice = (female or spanish)[0]
+                for out in speaker.GetAudioOutputs():
+                    desc = out.GetDescription()
+                    if any(p.lower() in desc.lower() for p in self.outputs) and "digital" not in desc.lower():
+                        speaker.AudioOutput = out
+                        break
                 speaker.Rate = self.rate
             except Exception as e:
                 print(f"[voz] No se pudo iniciar SAPI ({e}); solo texto.")
@@ -227,9 +303,9 @@ class Voice:
                     try:
                         if msg.priority >= P_SAFETY:
                             self._urgent.clear()
-                            self.neural.play(path)                  # una urgencia no se interrumpe
+                            self._play(path)                  # una urgencia no se interrumpe
                         else:
-                            self.neural.play(path, self._urgent)    # se corta si llega una urgencia
+                            self._play(path, self._urgent)    # se corta si llega una urgencia
                         continue
                     except Exception:
                         pass
@@ -268,7 +344,9 @@ class LiveEngineer:
                  on_message: Optional[Callable[[str, int], None]] = None,
                  log_path: Optional[str] = None, auto_analysis: bool = True, auto_record: bool = True):
         self.name = driver_name
-        self.voice = Voice(enabled=speak, neural_voice=neural_voice)
+        from app.voice_commands import load_config
+        self.voice = Voice(enabled=speak, neural_voice=neural_voice,
+                           outputs=load_config().get("audio_output") or DEFAULT_OUTPUTS)
         self.on_message = on_message
         self.log_file = open(log_path, "a", encoding="utf-8") if log_path else None
         self.ir = irsdk.IRSDK() if IRSDK_AVAILABLE else None
