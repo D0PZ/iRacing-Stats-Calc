@@ -26,6 +26,7 @@ class Race:
     def __init__(self, monkeypatch, cars):
         monkeypatch.setattr(le, "load_tracker", lambda name, length: TrackLimitTracker(length))
         monkeypatch.setattr(le, "save_tracker", lambda *a, **k: None)
+        monkeypatch.setattr("app.voice_commands.load_config", lambda: {"claude": {"enabled": False}})
         self.msgs = []
         self.e = le.LiveEngineer(speak=False, neural_voice=None, on_message=lambda t, p: self.msgs.append(t),
                                  auto_analysis=False)

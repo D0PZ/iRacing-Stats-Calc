@@ -530,20 +530,29 @@ class LiveEngineer:
 
     # ------------------------------------------- Claude como intérprete
     def _init_claude(self):
-        from app.claude_interpreter import ANTHROPIC_AVAILABLE, ClaudeInterpreter, credentials_available
+        """
+        backend "claude_code" (por defecto): tu suscripción de Claude vía Claude Code, sin costo extra.
+        backend "api": ANTHROPIC_API_KEY, se cobra aparte; solo si lo eliges explícitamente.
+        """
+        from app.claude_interpreter import (ANTHROPIC_AVAILABLE, ClaudeCodeInterpreter, ClaudeInterpreter,
+                                            credentials_available)
         from app.voice_commands import load_config
         cfg = load_config().get("claude", {}) or {}
         if not cfg.get("enabled", True):
             return None
-        if not ANTHROPIC_AVAILABLE:
-            print("[claude] falta el SDK: pip install anthropic (respondo con reglas locales)", flush=True)
+        effort = cfg.get("effort", "low")
+        if cfg.get("backend", "claude_code") == "api":
+            if ANTHROPIC_AVAILABLE and credentials_available():
+                model = cfg.get("model", "claude-opus-5-5")
+                print(f"[claude] intérprete por API ({model}, esfuerzo {effort})", flush=True)
+                return ClaudeInterpreter(model=model, effort=effort)
+            print("[claude] backend 'api' sin ANTHROPIC_API_KEY: respondo con reglas locales", flush=True)
             return None
-        if not credentials_available():
-            print("[claude] sin ANTHROPIC_API_KEY: respondo con reglas locales", flush=True)
-            return None
-        model = cfg.get("model", "claude-opus-5-5")
-        print(f"[claude] intérprete activo ({model}, esfuerzo {cfg.get('effort', 'low')})", flush=True)
-        return ClaudeInterpreter(model=model, effort=cfg.get("effort", "low"))
+        if ClaudeCodeInterpreter.available():
+            print(f"[claude] intérprete con tu suscripción vía Claude Code (esfuerzo {effort})", flush=True)
+            return ClaudeCodeInterpreter(model=cfg.get("model"), effort=effort)
+        print("[claude] Claude Code no está instalado: respondo con reglas locales", flush=True)
+        return None
 
     def _is_radio_command(self, q: str) -> bool:
         n = self._norm(q)

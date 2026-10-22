@@ -61,6 +61,8 @@ class FakeIR:
 def eng(monkeypatch, tmp_path):
     import app.tire_model as tm
     monkeypatch.setattr(tm, "BASE", str(tmp_path / "tire_model"))    # no tocar data/ del repo
+    # Nunca usar la configuración real del piloto (ni llamar a Claude) en las pruebas
+    monkeypatch.setattr("app.voice_commands.load_config", lambda: {"claude": {"enabled": False}})
     # No leer ni escribir los mapas de límites guardados en data/
     monkeypatch.setattr(le, "load_tracker", lambda name, length: TrackLimitTracker(length))
     monkeypatch.setattr(le, "save_tracker", lambda *a, **k: None)
