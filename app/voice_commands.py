@@ -202,11 +202,33 @@ def recognize(audio: bytes, language: str = "es-CL", sample_rate: int = SAMPLE_R
         return None
 
 
-def _beep(freq: int):
+_beep_device = {"resolved": False, "index": None}
+
+
+def _beep_output() -> Optional[int]:
+    """Mismo dispositivo que la voz de la ingeniera (data/ingeniero.json -> audio_output)"""
+    if not _beep_device["resolved"]:
+        try:
+            from app.live_engineer import DEFAULT_OUTPUTS, pick_output_device
+            found = pick_output_device(load_config().get("audio_output") or DEFAULT_OUTPUTS)
+            _beep_device["index"] = found[0] if found else None
+        except Exception:
+            _beep_device["index"] = None
+        _beep_device["resolved"] = True
+    return _beep_device["index"]
+
+
+def _beep(freq: int, ms: int = 70):
+    """Pitido del push-to-talk en los audífonos, en su propio canal (no corta a la ingeniera)"""
     def go():
         try:
-            import winsound
-            winsound.Beep(freq, 60)
+            import sounddevice as sd
+            sr = 24000
+            t = np.arange(int(sr * ms / 1000)) / sr
+            tone = 0.25 * np.sin(2 * np.pi * freq * t)
+            fade = np.minimum(1, np.minimum(t, t[-1] - t) / 0.005)   # sin clic al empezar/terminar
+            with sd.OutputStream(samplerate=sr, channels=1, dtype="float32", device=_beep_output()) as out:
+                out.write((tone * fade).astype("float32").reshape(-1, 1))
         except Exception:
             pass
     threading.Thread(target=go, daemon=True).start()
