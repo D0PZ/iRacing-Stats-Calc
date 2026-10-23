@@ -19,13 +19,15 @@ Presión: objetivo exacto centro = promedio de los bordes (banda plana, contacto
 
 import json
 import os
-import re
 from typing import Dict, List, Optional
 
 import numpy as np
 
-BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "tire_model")
-CORNERS = {"LF": "LeftFront", "RF": "RightFront", "LR": "LeftRear", "RR": "RightRear"}
+from app.paths import data_dir
+from app.util import WHEELS, nums as _nums, slug
+
+BASE = data_dir("tire_model")
+CORNERS = WHEELS
 NAMES = {"LF": "delantera izquierda", "RF": "delantera derecha", "LR": "trasera izquierda", "RR": "trasera derecha"}
 
 DEFAULT_TARGETS = {"front_spread": 7.0, "rear_spread": 5.0, "mid": 0.0}
@@ -42,12 +44,8 @@ MAX_CAMBER_MOVE = 0.5        # tope por salida: acercarse en pasos seguros y vol
 MAX_PRESSURE_MOVE = 8.0
 
 
-def _nums(text) -> List[float]:
-    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(text))]
-
-
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "auto"
+    return slug(text, default="auto")
 
 
 def read_setup(setup: dict) -> Dict[str, dict]:

@@ -8,7 +8,6 @@ fuertes, el ABS quede por encima de lo que realmente alcanzas a pisar. Al cambia
 delantera cambia el reparto de frenada, así que se recalcula el balance para mantenerlo.
 """
 
-import re
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -18,11 +17,6 @@ PAD_OPTIONS = {
     "porsche 911 cup (992": [0.63, 0.58, 0.55, 0.53, 0.51, 0.48, 0.44],
 }
 PEDAL_HEADROOM = 0.95   # las frenadas fuertes deben llegar al ABS con <= 95% de tu pedal máximo real
-
-
-def _num(text) -> Optional[float]:
-    m = re.search(r"-?\d+(?:\.\d+)?", str(text))
-    return float(m.group()) if m else None
 
 
 def pad_options_for(car: str, extra: Optional[Dict[str, List[float]]] = None) -> Optional[List[float]]:

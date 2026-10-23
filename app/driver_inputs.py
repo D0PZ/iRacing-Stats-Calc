@@ -18,11 +18,12 @@ Métricas (por vuelta y por curva):
   primero se endereza, después se pisa.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 
-G = 9.81
+from app.util import G
+
 CORR_RATE = 90.0      # °/s
 CORR_AMP = 10.0       # °
 

@@ -4,7 +4,6 @@ Módulo para proyecciones y análisis de tendencias
 
 from typing import List, Dict, Any, Tuple
 import statistics
-from datetime import datetime, timedelta
 
 
 class ProjectionEngine:

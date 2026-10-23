@@ -11,7 +11,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ingeniero.json")
+from app.paths import data_dir
+
+CONFIG_PATH = data_dir("ingeniero.json")
 SAMPLE_RATE = 16000
 
 DEFAULT_CONFIG = {
@@ -47,11 +49,6 @@ def _init_pygame():
     pygame.display.init()
     pygame.joystick.init()
     return pygame
-
-
-def list_joysticks() -> list:
-    pygame = _init_pygame()
-    return [pygame.joystick.Joystick(i).get_name() for i in range(pygame.joystick.get_count())]
 
 
 def wait_for_button(timeout: float = 15.0) -> Optional[tuple]:

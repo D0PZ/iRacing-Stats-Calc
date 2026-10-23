@@ -10,6 +10,7 @@ import os
 
 # Importar módulos de la aplicación
 from app.data_loader import DataLoader
+from app.paths import app_root
 from app.stats_calculator import StatsCalculator
 from app.projections import ProjectionEngine
 from app.charts import ChartGenerator
@@ -497,7 +498,7 @@ class IracingStatsApp:
         file_path = filedialog.askopenfilename(
             title="Seleccionar archivo JSON de iRacing",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialdir=os.path.dirname(os.path.abspath(__file__))
+            initialdir=app_root()
         )
         
         if file_path:

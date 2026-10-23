@@ -17,8 +17,9 @@ Qué ajuste corrige qué, según DÓNDE aparece el problema:
   Rake: bajar la perch de ambas traseras sube la cola = más apoyo delantero en curvas rápidas.
 """
 
-import re
 from typing import Dict, List, Optional
+
+from app.util import num as _num
 
 EVENT_RATE = 0.8          # eventos por vuelta para considerar que hay una tendencia
 FRONT_ARB_ORDER = [1, 2, 3, 4, 5, 7, 6]     # 992 Cup: de más blanda a más dura
@@ -65,11 +66,6 @@ def cross_plan(perch: Dict[str, float], cross: float, target: float, sens: Optio
     new = {"LF": perch["LF"] + d, "RR": perch["RR"] + d, "RF": perch["RF"] - d, "LR": perch["LR"] - d}
     predicted = cross + d * k
     return {"mm": d, "perch": {w: round(v, 2) for w, v in new.items()}, "cross_previsto": round(predicted, 1)}
-
-
-def _num(text) -> Optional[float]:
-    m = re.search(r"[-+]?\d+(?:\.\d+)?", str(text or ""))
-    return float(m.group()) if m else None
 
 
 def read_chassis(flat: Dict[str, str]) -> dict:

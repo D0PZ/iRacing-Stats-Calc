@@ -10,9 +10,10 @@ import time
 from typing import Callable, Optional
 
 from app.ibt_reader import telemetry_dir
+from app.paths import data_dir, logs_dir
 
-STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "analyzed_ibt.json")
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+STATE_PATH = data_dir("analyzed_ibt.json")
+LOG_DIR = logs_dir()
 SETTLE_SECONDS = 20      # el archivo no cambia hace 20 s: iRacing terminó de escribirlo
 LOOKBACK_SECONDS = 3600  # al arrancar, solo sesiones de la última hora
 

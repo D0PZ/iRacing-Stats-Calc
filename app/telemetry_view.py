@@ -11,6 +11,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from app.ibt_reader import telemetry_dir
+from app.paths import logs_dir
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
 
 PRIORITY_LABEL = {1: "ALTA", 2: "MEDIA", 3: "INFO"}
@@ -382,7 +383,7 @@ class LiveEngineerView:
         if not IRSDK_AVAILABLE:
             messagebox.showerror("Falta pyirsdk", "Instala la dependencia: pip install pyirsdk pywin32")
             return
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        log_dir = logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         import time
         from app.voice_commands import PushToTalk, load_config

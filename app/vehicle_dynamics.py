@@ -20,7 +20,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-G = 9.81
+from app.util import G
+
 WHEELBASE = 2.46                      # m (Porsche 992 Cup; solo escala K)
 SPEED_BANDS = (("lenta", 0.0, 100 / 3.6), ("media", 100 / 3.6, 160 / 3.6), ("rapida", 160 / 3.6, 1e9))
 FUEL_DENSITY = 0.75                   # kg/L
@@ -118,20 +119,6 @@ def braking_envelope(v, ax, brake, bins_ms=np.arange(15, 85, 5)) -> Tuple[np.nda
             centers.append(b + 2.5)
             values.append(float(np.percentile(-ax[k], 95)))
     return np.array(centers), np.array(values)
-
-
-def min_braking_distance(v1: float, v2: float, env_v: np.ndarray, env_a: np.ndarray, steps: int = 200) -> float:
-    """d = ∫ v dv / a_max(v) de v2 a v1 (m), con a_max interpolada de tu envolvente"""
-    if v1 <= v2 or len(env_v) < 2:
-        return 0.0
-    vs = np.linspace(v2, v1, steps)
-    a = np.interp(vs, env_v, env_a)
-    return float(np.trapezoid(vs / np.maximum(a, 1.0), vs))
-
-
-def braking_time_gain(meters_later: float, v_entry: float) -> float:
-    """Frenar d metros más tarde = recorrerlos a velocidad de entrada en vez de frenando (aprox. lineal)"""
-    return max(meters_later, 0.0) / max(v_entry, 1.0) * 0.5
 
 
 def gg_envelope(v, ax, ay, bins_ms=np.arange(10, 85, 5)) -> Tuple[np.ndarray, np.ndarray]:

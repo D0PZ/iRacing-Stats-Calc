@@ -5,14 +5,12 @@ Las genera el análisis de .ibt y las usa el ingeniero en vivo.
 
 import json
 import os
-import re
 from typing import Optional
 
-BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "references")
+from app.paths import data_dir
+from app.util import slug as _slug
 
-
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "x"
+BASE = data_dir("references")
 
 
 def path_for(track: str, car: str) -> str:

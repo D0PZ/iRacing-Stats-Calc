@@ -17,11 +17,13 @@ límite), las salidas reales y la velocidad de salida.
 import json
 import math
 import os
-import re
 from collections import deque
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
+
+from app.paths import data_dir
+from app.util import slug
 
 BIN = 5.0             # metros por celda del mapa de rumbo
 ANCHOR_WINDOW = 800   # metros previos usados para anclar la posición lateral
@@ -30,11 +32,6 @@ ZONE_AFTER = 60       # y termina 60 m después
 PEAK_WINDOW = 25      # el margen se mide a ±25 m del punto donde está el límite
 MAX_LIMIT_OFFSET = 3.0  # más lejos que esto de tu línea no es un límite, es un trompo o error
 MIN_BIN_SAMPLES = 12  # muestras por celda para confiar en el rumbo de referencia
-
-
-def heading_from_irsdk(yaw_north: float, vel_x: float, vel_y: float) -> float:
-    """Rumbo de la velocidad en coordenadas del mundo (radianes, antihorario desde el Este)"""
-    return math.pi / 2 - yaw_north + math.atan2(vel_y, max(vel_x, 0.1))
 
 
 class TrackLimitTracker:
@@ -202,9 +199,9 @@ class TrackLimitTracker:
 
 
 def store_path(track_name: str) -> str:
-    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "track_limits")
+    base = data_dir("track_limits")
     os.makedirs(base, exist_ok=True)
-    safe = re.sub(r"[^a-z0-9]+", "_", track_name.lower()).strip("_") or "pista"
+    safe = slug(track_name, default="pista")
     return os.path.join(base, f"{safe}.json")
 
 

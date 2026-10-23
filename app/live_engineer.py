@@ -12,7 +12,6 @@ import queue
 import re
 import threading
 import time
-import re as _re
 import unicodedata
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -24,6 +23,9 @@ try:
 except ImportError:
     IRSDK_AVAILABLE = False
 
+from app.paths import logs_dir
+from app.util import nums
+from app.vehicle_dynamics import WHEELBASE
 from app.track_limits import load_tracker, save_tracker
 from app.references import load_references
 
@@ -39,7 +41,6 @@ N_SEGMENTS = 20          # Minisectores por vuelta para comparar con rivales
 PROFILE_BINS = 200       # Resolución del perfil de velocidad para detectar curvas
 TICK_HZ = 60            # iRacing publica telemetría a 60 Hz; esperamos su evento de "dato nuevo"
 SLOW_EVERY = 6          # tareas pesadas a 10 Hz
-WHEELBASE = 2.46        # m (GT/Cup típico; solo escala el ángulo de subviraje)
 
 
 @dataclass(order=True)
@@ -2308,7 +2309,7 @@ class LiveEngineer:
                 msg += " La pista tiene humedad."
             return msg or "No tengo datos del clima."
 
-        m_curve = _re.search(r"(?:curva|la)\s+(\d{1,2})", n)
+        m_curve = re.search(r"(?:curva|la)\s+(\d{1,2})", n)
         if m_curve and has("freno", "frenada", "frenar", "referencia", "como hago", "como tomo"):
             k = int(m_curve.group(1)) - 1
             if 0 <= k < max(len(self.corners), 1):
@@ -2526,9 +2527,7 @@ class LiveEngineer:
         else:
             yield path, d
 
-    @staticmethod
-    def _nums(value) -> List[float]:
-        return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(value))]
+    _nums = staticmethod(nums)
 
     def _tire_analysis(self, setup: dict) -> List[str]:
         """Temperaturas de la última salida (iRacing las actualiza al entrar a pits)"""
@@ -2625,7 +2624,7 @@ class LiveEngineer:
 
         # Reporte completo en archivo
         import os
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        log_dir = logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         path = os.path.join(log_dir, time.strftime("setup_%Y%m%d_%H%M%S.txt"))
         with open(path, "w", encoding="utf-8") as f:
@@ -2681,7 +2680,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+    log_dir = logs_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt"))
     from app.voice_commands import PushToTalk, load_config, save_config, wait_for_button

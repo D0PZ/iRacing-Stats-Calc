@@ -14,10 +14,10 @@ import numpy as np
 
 from app.ibt_reader import IBTFile
 from app.references import save_references
+from app.util import G, num
 from app.track_limits import (TrackLimitTracker, gps_lateral_offsets, replay_files,
                               save_tracker)
 
-G = 9.81
 KMH = 3.6
 
 
@@ -124,10 +124,7 @@ class TelemetryAnalyzer:
             return np.full(i1 - i0, default, dtype=float)
         return a[i0:i1].astype(float)
 
-    @staticmethod
-    def _num(value) -> Optional[float]:
-        m = re.search(r"-?\d+(?:\.\d+)?", str(value))
-        return float(m.group()) if m else None
+    _num = staticmethod(num)
 
     # ------------------------------------------------------------- vueltas
     def _split_laps(self):

@@ -7,8 +7,6 @@ matplotlib.use('TkAgg')  # Usar backend TkAgg
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from typing import List, Dict, Any, Optional
-from datetime import datetime
 import statistics as stats_module
 
 

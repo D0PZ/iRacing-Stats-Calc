@@ -12,18 +12,14 @@ Las recomendaciones son pasos pequeños (0.2 mm por rueda atrás, 0.5 mm total a
 el efecto salida a salida.
 """
 
-import re
 from typing import Dict, List, Optional
+
+from app.util import num as _num
 
 REAR_STEP = 0.2       # mm por rueda
 FRONT_STEP = 0.5      # mm total del eje
 EVENT_RATE = 0.8      # eventos por vuelta para considerar que hay una tendencia
 ASYM_TOLERANCE = 0.2  # mm
-
-
-def _num(text) -> Optional[float]:
-    m = re.search(r"[-+]?\d+(?:\.\d+)?", str(text or ""))
-    return float(m.group()) if m else None
 
 
 def read_toe(flat_setup: Dict[str, str]) -> Dict[str, float]:

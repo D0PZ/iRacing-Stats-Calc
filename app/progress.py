@@ -11,15 +11,14 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 
-BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "progress")
+from app.paths import data_dir
+from app.util import slug as _slug
 
-
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "x"
+BASE = data_dir("progress")
 
 
 def fmt(t: Optional[float]) -> str:

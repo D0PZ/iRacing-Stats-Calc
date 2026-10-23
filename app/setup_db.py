@@ -15,8 +15,10 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "setups")
-WHEELS = {"LF": "LeftFront", "RF": "RightFront", "LR": "LeftRear", "RR": "RightRear"}
+from app.paths import data_dir
+from app.util import WHEELS, nums as _nums, slug as _slug
+
+BASE = data_dir("setups")
 MAX_STINTS = 300
 MIN_FIT_STINTS = 3   # con menos salidas medidas, una recta no es confiable: se usa la última + el modelo
 # Campos de medición (no son setup): se guardan aparte
@@ -25,14 +27,6 @@ MEASURE_KEYS = ("LastTemps", "LastHotPressure", "TreadRemaining", "UpdateCount")
 KEY_FIELDS = re.compile(r"StartingPressure|Camber|ToeIn|ArbSetting|WingAngle|BrakePadMu|BrakePressureBias|"
                         r"TcSetting|AbsSetting|FuelLevel|RideHeight|SpringPerchOffset|CrossWeight|"
                         r"Spring|Damper|Bump|Rebound|Diff|Preload", re.I)
-
-
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "x"
-
-
-def _nums(text) -> List[float]:
-    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(text))]
 
 
 def flatten_setup(setup: dict) -> Dict[str, str]:
