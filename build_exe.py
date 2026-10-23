@@ -13,6 +13,12 @@ def build():
     main_file = os.path.join(base_dir, "main.py")
     icon_file = os.path.join(base_dir, "icon.ico")
     
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print("❌ Falta PyInstaller: pip install pyinstaller")
+        return 1
+
     # Verificar que existe el icono
     if not os.path.exists(icon_file):
         print("⚠️ Icono no encontrado, creándolo...")
@@ -26,7 +32,7 @@ def build():
         "--windowed",                        # Sin consola (app GUI)
         "--noconfirm",                       # Sobrescribir sin preguntar
         "--clean",                           # Limpiar cache
-        "--add-data=app;app",               # Incluir el módulo app
+        "--collect-data=speech_recognition",  # flac-win32.exe para el reconocimiento de voz
         f"--icon={icon_file}",              # Icono personalizado
         f"--distpath={os.path.join(base_dir, 'dist')}",
         f"--workpath={os.path.join(base_dir, 'build')}",
@@ -53,6 +59,7 @@ def build():
         print(f"  {exe_path}")
         print()
         print("Puedes copiar este .exe a cualquier lugar y ejecutarlo.")
+        print("Guarda sus datos en las carpetas data/ y logs/ junto al .exe.")
     else:
         print()
         print("❌ Error durante el build")

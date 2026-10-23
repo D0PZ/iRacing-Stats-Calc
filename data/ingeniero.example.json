@@ -1,0 +1,23 @@
+{
+  "driver_name": "Diego",
+  "language": "es-CL",
+  "voice": "es-CL-CatalinaNeural",
+  "audio_output": ["Auriculares", "Realtek(R) Audio"],
+  "ptt_joystick": null,
+  "ptt_button": null,
+  "ptt_key": "insert",
+  "claude": {
+    "enabled": true,
+    "backend": "claude_code",
+    "model": "haiku",
+    "effort": "low"
+  },
+  "tire_targets": {
+    "front_spread": 7.0,
+    "rear_spread": 5.0,
+    "mid": 0.0
+  },
+  "pad_options": {
+    "porsche 911 cup (992": [0.63, 0.58, 0.55, 0.53, 0.51, 0.48, 0.44]
+  }
+}

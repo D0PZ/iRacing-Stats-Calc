@@ -78,4 +78,5 @@ Thumbs.db
 !package.json
 ml_models/
 logs/
-data/
+data/*
+!data/ingeniero.example.json

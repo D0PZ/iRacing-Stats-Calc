@@ -84,7 +84,7 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 ## 🚀 Installation
 
 ### Requirements
-- Python 3.8 or higher
+- Python 3.9 or higher (tested on 3.12)
 - Windows 10/11
 
 ### Installation from source
@@ -102,12 +102,28 @@ python main.py
 ```
 
 ### Dependencies
-```
-matplotlib>=3.5.0
-scikit-learn>=1.0.0
-numpy>=1.20.0
-joblib>=1.0.0
-```
+See `requirements.txt`: matplotlib, scikit-learn and numpy for the stats app; pyirsdk, pywin32, edge-tts,
+sounddevice, SpeechRecognition, pygame and keyboard for the live engineer; anthropic for the optional
+Claude API backend.
+
+### Configuration
+The live engineer reads `data/ingeniero.json` (created when you pick a voice, audio output or wheel button).
+Copy `data/ingeniero.example.json` to start from every option:
+
+| Key | Default | What it does |
+|-----|---------|--------------|
+| `driver_name` | `"Diego"` | How the radio calls you (`--nombre` saves it) |
+| `language` | `"es-CL"` | Speech recognition language |
+| `voice` | `"es-CL-CatalinaNeural"` | Neural voice (edge-tts) |
+| `audio_output` | `["Auriculares", "Realtek(R) Audio"]` | Output devices to try, first match wins |
+| `ptt_joystick`, `ptt_button` | `null` | Wheel button for push-to-talk (`asignar_boton.bat`) |
+| `ptt_key` | `"insert"` | Keyboard push-to-talk |
+| `claude` | `enabled`, `backend: "claude_code"`, `model: "haiku"`, `effort: "low"` | Voice-question interpreter |
+| `tire_targets` | `front_spread 7`, `rear_spread 5`, `mid 0` | Fixed tire temperature targets (°C) instead of learned ones |
+| `pad_options` | 992 Cup pads | Front brake-pad options per car (key = part of the car name) |
+
+Running from source, `data/` and `logs/` live in the repo folder; the built `.exe` keeps them next to itself.
+Trained ML models are stored in `%APPDATA%\iRacingStatsCalc\ml_models`.
 
 ## 📖 Usage
 
@@ -133,18 +149,43 @@ joblib>=1.0.0
 
 ```
 iRacing-Stats-Calc/
-├── main.py                 # Entry point
-├── requirements.txt        # Dependencies
-├── README.md              # Documentation
+├── main.py                    # GUI entry point
+├── ingeniero.bat              # Live engineer standalone
+├── asignar_boton.bat          # Assign the push-to-talk wheel button
+├── elegir_salida.bat          # Pick the radio audio output
+├── build_exe.py               # PyInstaller build (create_icon.py makes icon.ico)
 ├── app/
-│   ├── __init__.py
-│   ├── gui.py             # Graphical interface (Tkinter)
-│   ├── data_loader.py     # JSON data loading and parsing
-│   ├── stats_calculator.py # Statistical calculations
-│   ├── projections.py     # Projection engine
-│   ├── charts.py          # Chart generator (Matplotlib)
-│   └── ml_engine.py       # Machine Learning engine
-└── build/                 # Build files
+│   ├── gui.py                 # Tkinter interface
+│   ├── data_loader.py         # iRacing stats JSON loading
+│   ├── stats_calculator.py    # Race statistics
+│   ├── projections.py         # Trend projections
+│   ├── charts.py              # Matplotlib charts
+│   ├── ml_engine.py           # Machine Learning models
+│   ├── ibt_reader.py          # .ibt telemetry file reader
+│   ├── telemetry_analyzer.py  # Corner-by-corner .ibt analysis (CLI too)
+│   ├── telemetry_view.py      # Telemetry and live engineer tabs
+│   ├── progress.py / progress_view.py  # Progress per track and car
+│   ├── ab_test.py             # Statistical A/B setup tests
+│   ├── setup_db.py            # Setup database per track and car
+│   ├── tire_model.py          # Tire temperature model (camber/pressure)
+│   ├── chassis_advisor.py     # ARBs, wing, spring perch
+│   ├── toe_advisor.py         # Toe per wheel
+│   ├── balance_model.py       # Understeer gradient
+│   ├── vehicle_dynamics.py    # Physics: grip envelopes, fuel mass
+│   ├── driver_inputs.py       # Pedal and steering analysis
+│   ├── session_plan.py        # Qualy/race fuel and brake pads
+│   ├── references.py          # Brake/throttle references per corner
+│   ├── track_limits.py        # Track limits from GPS
+│   ├── auto_analysis.py       # Analyze each finished session
+│   ├── voice_commands.py      # Push-to-talk, speech recognition, config
+│   ├── claude_interpreter.py  # Claude as voice-question interpreter
+│   ├── paths.py / util.py     # data/ and logs/ folders, shared helpers
+│   ├── live_engineer.py       # Live engineer core loop
+│   └── engineer/              # Live engineer parts: audio, fuel, rivals, race control,
+│                              # coaching, track, setup coach, recording, voice Q&A, CLI
+├── tests/                     # pytest suite (synthetic .ibt files, fake iRacing SDK)
+├── data/                      # Your config, setups, progress, track limits (git-ignored)
+└── logs/                      # Radio logs and reports (git-ignored)
 ```
 
 ## 📊 Calculated Statistics
