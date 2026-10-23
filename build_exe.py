@@ -14,6 +14,10 @@ def build():
     icon_file = os.path.join(base_dir, "icon.ico")
     
     try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # emojis con la salida redirigida
+    except Exception:
+        pass
+    try:
         import PyInstaller  # noqa: F401
     except ImportError:
         print("❌ Falta PyInstaller: pip install pyinstaller")
