@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from app.ibt_reader import telemetry_dir
 from app.paths import data_dir, logs_dir
+from app.util import atomic_write_json
 
 STATE_PATH = data_dir("analyzed_ibt.json")
 LOG_DIR = logs_dir()
@@ -26,7 +27,7 @@ class AutoAnalyzer:
         self.state_path = state_path
         self.log_dir = log_dir
         self.since = time.time() - LOOKBACK_SECONDS
-        self.busy = False
+        self._busy = threading.Lock()
         self._state = self._load()
 
     def _load(self) -> dict:
@@ -37,9 +38,7 @@ class AutoAnalyzer:
             return {}
 
     def _save(self):
-        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
-        with open(self.state_path, "w", encoding="utf-8") as f:
-            json.dump(self._state, f)
+        atomic_write_json(self.state_path, self._state)
 
     def pending(self) -> Optional[str]:
         """El .ibt más nuevo ya cerrado y sin analizar"""
@@ -65,12 +64,12 @@ class AutoAnalyzer:
 
     def poll(self, can_run: bool, sync: bool = False) -> bool:
         """Lanza el análisis si hay una sesión nueva y no estás en pista. Devuelve True si arrancó."""
-        if self.busy or not can_run:
+        if not can_run or not self._busy.acquire(blocking=False):
             return False
         path = self.pending()
         if not path:
+            self._busy.release()
             return False
-        self.busy = True
         if sync:
             self._run(path)
         else:
@@ -95,7 +94,7 @@ class AutoAnalyzer:
         except Exception as e:
             print(f"[análisis] no se pudo analizar {os.path.basename(path)}: {e}", flush=True)
         finally:
-            self.busy = False
+            self._busy.release()
 
 
 def spoken_summary(res) -> str:

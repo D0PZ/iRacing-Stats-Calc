@@ -36,3 +36,15 @@ def test_atomic_write_json_replaces_without_leftovers(tmp_path):
     with open(path, encoding="utf-8") as f:
         assert json.load(f) == {"a": 2}
     assert os.listdir(tmp_path / "sub") == ["x.json"]
+
+
+def test_corrupt_track_limits_file_starts_fresh(monkeypatch, tmp_path):
+    import app.track_limits as tl
+    monkeypatch.setattr(tl, "data_dir", lambda *p: str(tmp_path.joinpath(*p)))
+    tracker = tl.TrackLimitTracker(3700.0)
+    tracker.zones = [{"start": 100.0}]
+    tl.save_tracker("Test Ring", tracker)
+    assert tl.load_tracker("Test Ring", 3700.0).zones == [{"start": 100.0}]
+    with open(tl.store_path("Test Ring"), "w", encoding="utf-8") as f:
+        f.write('{"track_len": 37')                       # cortado a mitad de escritura
+    assert tl.load_tracker("Test Ring", 3700.0).zones == []

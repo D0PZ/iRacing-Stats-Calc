@@ -16,7 +16,7 @@ from typing import List, Optional
 import numpy as np
 
 from app.paths import data_dir
-from app.util import slug as _slug
+from app.util import atomic_write_json, slug as _slug
 
 BASE = data_dir("progress")
 
@@ -44,11 +44,7 @@ class ProgressDB:
         return self.data["sessions"]
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, self.path)
+        atomic_write_json(self.path, self.data, ensure_ascii=False, indent=1)
 
     def add(self, session_id: str, when: str, kind: str, lap_times: List[float], ideal: Optional[float] = None,
             offtracks: int = 0, incidents: int = 0, balance: Optional[dict] = None, source: str = "") -> Optional[dict]:

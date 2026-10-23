@@ -23,7 +23,7 @@ from typing import List, Optional
 import numpy as np
 
 from app.paths import data_dir
-from app.util import slug
+from app.util import atomic_write_json, slug
 
 BIN = 5.0             # metros por celda del mapa de rumbo
 ANCHOR_WINDOW = 800   # metros previos usados para anclar la posición lateral
@@ -213,14 +213,13 @@ def load_tracker(track_name: str, track_len: float) -> TrackLimitTracker:
                 d = json.load(f)
             if abs(d.get("track_len", 0) - track_len) < 20:
                 return TrackLimitTracker.from_dict(d)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[límites] {os.path.basename(path)} ilegible ({e}); empiezo de cero", flush=True)
     return TrackLimitTracker(track_len)
 
 
 def save_tracker(track_name: str, tracker: TrackLimitTracker):
-    with open(store_path(track_name), "w", encoding="utf-8") as f:
-        json.dump(tracker.to_dict(), f)
+    atomic_write_json(store_path(track_name), tracker.to_dict())
 
 
 def gps_lateral_offsets(files, laps_ok) -> List[Optional[np.ndarray]]:

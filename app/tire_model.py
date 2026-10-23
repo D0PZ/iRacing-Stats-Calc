@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.paths import data_dir
-from app.util import WHEELS, nums as _nums, slug
+from app.util import WHEELS, atomic_write_json, nums as _nums, slug
 
 BASE = data_dir("tire_model")
 CORNERS = WHEELS
@@ -91,9 +91,7 @@ class TireModel:
         self.forced = set(targets or {})
 
     def save(self):
-        os.makedirs(BASE, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=1)
+        atomic_write_json(self.path, self.state, indent=1)
 
     @staticmethod
     def metrics(temps) -> tuple:

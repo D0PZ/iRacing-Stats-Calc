@@ -716,7 +716,8 @@ class TelemetryAnalyzer:
         vals = [b[l.i0:l.i1] for b, l in zip(biases, valid) if b is not None]
         if vals:
             bias = float(np.median(np.concatenate(vals))) / 100
-        options = sp.pad_options_for(res.car)
+        from app.voice_commands import load_config
+        options = sp.pad_options_for(res.car, load_config().get("pad_options"))
         if options and mu_f and mu_f not in options:
             options = sorted(set(options) | {mu_f}, reverse=True)
         res.pad_plan = sp.pad_plan(res.brake_profile, mu_f, mu_r, bias, options) if options else None

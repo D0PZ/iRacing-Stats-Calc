@@ -12,6 +12,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from app.paths import data_dir
+from app.util import atomic_write_json
 
 CONFIG_PATH = data_dir("ingeniero.json")
 SAMPLE_RATE = 16000
@@ -21,6 +22,8 @@ DEFAULT_CONFIG = {
     "ptt_button": None,     # índice del botón
     "ptt_key": "insert",    # tecla alternativa (iRacing no la usa por defecto)
     "language": "es-CL",
+    "driver_name": "Diego",  # cómo te llama la radio
+    "pad_options": {},       # pastillas delanteras por auto: {"parte del nombre del auto": [0.63, 0.58, ...]}
 }
 
 
@@ -35,9 +38,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    atomic_write_json(CONFIG_PATH, cfg, indent=2, ensure_ascii=False)
 
 
 def _init_pygame():
@@ -81,6 +82,7 @@ class PushToTalk:
         self._frames = []
         self._stream = None
         self._lock = threading.Lock()
+        self._hooks = []
         self.available = True
         try:
             import sounddevice  # noqa: F401
@@ -98,8 +100,8 @@ class PushToTalk:
         if self.cfg.get("ptt_key"):
             try:
                 import keyboard
-                keyboard.on_press_key(self.cfg["ptt_key"], lambda e: self._press(), suppress=False)
-                keyboard.on_release_key(self.cfg["ptt_key"], lambda e: self._release(), suppress=False)
+                self._hooks = [keyboard.on_press_key(self.cfg["ptt_key"], lambda e: self._press(), suppress=False),
+                               keyboard.on_release_key(self.cfg["ptt_key"], lambda e: self._release(), suppress=False)]
             except Exception as e:
                 print(f"[ptt] Tecla no disponible ({e})", flush=True)
         btn = self.cfg.get("ptt_button")
@@ -108,6 +110,14 @@ class PushToTalk:
 
     def stop(self):
         self._stop.set()
+        if self._hooks:
+            import keyboard
+            for h in self._hooks:
+                try:
+                    keyboard.unhook(h)
+                except (KeyError, ValueError):
+                    pass
+            self._hooks = []
 
     def _joystick_loop(self):
         try:

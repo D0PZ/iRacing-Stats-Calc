@@ -1108,8 +1108,8 @@ class LiveEngineer:
                 self.zone_state = {}
                 if self.limits.zones:
                     print(f"[límites] {len(self.limits.zones)} zonas de límite conocidas en {name}", flush=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[límites] no se pudo cargar la pista: {e}", flush=True)
         try:
             self.pit_limit_kmh = self._nums(self.ir["WeekendInfo"]["TrackPitSpeedLimit"])[0]
             if "mph" in str(self.ir["WeekendInfo"]["TrackPitSpeedLimit"]):
@@ -2662,7 +2662,7 @@ def main():
     import os
     import sys
     parser = argparse.ArgumentParser(description="Ingeniero de carrera en vivo para iRacing")
-    parser.add_argument("--nombre", default="Diego", help="Tu nombre para la radio")
+    parser.add_argument("--nombre", default=None, help="Tu nombre para la radio (queda guardado)")
     parser.add_argument("--sin-voz", action="store_true", help="Solo texto en consola")
     parser.add_argument("--voz", default=None,
                         help="Voz neuronal (ej: es-AR-TomasNeural, es-MX-JorgeNeural, es-CL-CatalinaNeural)")
@@ -2723,9 +2723,12 @@ def main():
     if args.voz:
         cfg["voice"] = args.voz
         save_config(cfg)
+    if args.nombre:
+        cfg["driver_name"] = args.nombre
+        save_config(cfg)
     voice = cfg.get("voice") or DEFAULT_NEURAL_VOICE
 
-    eng = LiveEngineer(driver_name=args.nombre, speak=not args.sin_voz,
+    eng = LiveEngineer(driver_name=cfg.get("driver_name") or "Diego", speak=not args.sin_voz,
                        neural_voice=None if args.voz_windows else voice, log_path=log_path,
                        auto_record=not args.sin_grabar)
     if not args.sin_ptt:

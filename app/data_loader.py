@@ -78,7 +78,7 @@ class DataLoader:
         try:
             # Formato: "2025-12-09T00:15:00Z"
             return datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
-        except:
+        except (ValueError, TypeError, AttributeError):
             return datetime.min
     
     def get_all_sessions(self) -> List[Dict[str, Any]]:

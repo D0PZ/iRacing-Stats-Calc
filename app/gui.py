@@ -391,7 +391,7 @@ class IracingStatsApp:
         for canvas in self.active_canvases:
             try:
                 canvas.get_tk_widget().destroy()
-            except:
+            except tk.TclError:
                 pass
         self.active_canvases = []
         
@@ -1138,7 +1138,7 @@ class IracingStatsApp:
                 from datetime import datetime
                 dt = datetime.fromisoformat(last_date)
                 last_date = dt.strftime('%d/%m/%Y %H:%M')
-            except:
+            except (ValueError, TypeError):
                 pass
         
         disk_status = "✅ Guardado" if model_info.get('model_exists_on_disk') else "❌ No guardado"

@@ -31,3 +31,10 @@ def test_keeps_pad_when_already_at_pedal_limit():
 def test_fuel_plans():
     assert sp.qualy_fuel(3.09, 2) == pytest.approx(9.77)
     assert sp.race_fuel(3.09, 12) == pytest.approx(40.67)
+
+
+def test_pad_options_extend_from_config():
+    extra = {"BMW M4 GT3": [0.5, 0.45]}
+    assert sp.pad_options_for("BMW M4 GT3 EVO", extra) == [0.5, 0.45]
+    assert sp.pad_options_for("BMW M4 GT3 EVO") is None
+    assert sp.pad_options_for("Porsche 911 Cup (992.2)", extra)[0] == 0.63

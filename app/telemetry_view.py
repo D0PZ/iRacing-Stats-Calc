@@ -389,8 +389,13 @@ class LiveEngineerView:
         from app.voice_commands import PushToTalk, load_config
         from app.live_engineer import P_BATTLE
         cfg = load_config()
-        self.engineer = LiveEngineer(on_message=self._on_message, neural_voice=cfg.get("voice") or DEFAULT_VOICE,
+        self.engineer = LiveEngineer(driver_name=cfg.get("driver_name") or "Diego", on_message=self._on_message,
+                                     neural_voice=cfg.get("voice") or DEFAULT_VOICE,
                                      log_path=os.path.join(log_dir, time.strftime("radio_%Y%m%d_%H%M%S.txt")))
+        ptt_keys = ("ptt_joystick", "ptt_button", "ptt_key")
+        if self.ptt is not None and any(self.ptt.cfg.get(k) != cfg.get(k) for k in ptt_keys):
+            self.ptt.stop()     # cambiaste el botón: rearmar con el nuevo
+            self.ptt = None
         if self.ptt is None:
             self.ptt = PushToTalk(on_text=lambda t: self.engineer and self.engineer.ask(t),
                                   on_error=lambda m: self.engineer and self.engineer.emit(m, P_BATTLE + 5, ttl=6,
@@ -436,9 +441,9 @@ class LiveEngineerView:
     def _on_message(self, text, priority):
         import time
         line = f"[{time.strftime('%H:%M:%S')}] {text}"
-        self.messages.append(line)
 
         def add():
+            self.messages.append(line)
             if self.log_widget is not None and self.log_widget.winfo_exists():
                 self.log_widget.insert(tk.END, line + "\n")
                 self.log_widget.see(tk.END)

@@ -158,7 +158,7 @@ class MLEngine:
                 track_encoded = self.track_encoder.transform(tracks)
                 for i, t in enumerate(track_encoded):
                     features[i].append(t)
-            except:
+            except (ValueError, TypeError):
                 for i in range(len(features)):
                     features[i].append(0)
         
@@ -168,7 +168,7 @@ class MLEngine:
                 series_encoded = self.series_encoder.transform(series)
                 for i, s in enumerate(series_encoded):
                     features[i].append(s)
-            except:
+            except (ValueError, TypeError):
                 for i in range(len(features)):
                     features[i].append(0)
         
@@ -509,13 +509,13 @@ class MLEngine:
         if track and self.track_encoder:
             try:
                 track_encoded = self.track_encoder.transform([track])[0]
-            except:
+            except (ValueError, TypeError):
                 track_encoded = 0
                 
         if series and self.series_encoder:
             try:
                 series_encoded = self.series_encoder.transform([series])[0]
-            except:
+            except (ValueError, TypeError):
                 series_encoded = 0
         
         # Crear vector de features

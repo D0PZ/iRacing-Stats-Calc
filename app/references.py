@@ -8,7 +8,7 @@ import os
 from typing import Optional
 
 from app.paths import data_dir
-from app.util import slug as _slug
+from app.util import atomic_write_json, slug as _slug
 
 BASE = data_dir("references")
 
@@ -30,7 +30,6 @@ def save_references(track: str, car: str, track_len: float, corners,
     existing = load_references(track, car, track_len)
     if existing and best_lap and existing.get("mejor_vuelta") and best_lap > existing["mejor_vuelta"] + 0.05:
         return None
-    os.makedirs(BASE, exist_ok=True)
     data = {"track": track, "car": car, "track_len": track_len,
             "mejor_vuelta": round(best_lap, 3) if best_lap else None,
             "fuel_per_lap": round(fuel_per_lap, 3) if fuel_per_lap else None, "plan": plan or [], "corners": [
@@ -41,8 +40,7 @@ def save_references(track: str, car: str, track_len: float, corners,
          "agarre_usado": getattr(c, "grip_usage", None), "inputs": list(getattr(c, "inputs_tips", []))}
         for c in corners]}
     path = path_for(track, car)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1, ensure_ascii=False)
+    atomic_write_json(path, data, indent=1, ensure_ascii=False)
     return path
 
 

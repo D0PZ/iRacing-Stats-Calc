@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-# Opciones de pastilla delantera por auto (lo que ofrece el garage). Ampliable en data/ingeniero.json
+# Opciones de pastilla delantera por auto (lo que ofrece el garage). Ampliable con "pad_options" en data/ingeniero.json
 PAD_OPTIONS = {
     "porsche 911 cup (992": [0.63, 0.58, 0.55, 0.53, 0.51, 0.48, 0.44],
 }
