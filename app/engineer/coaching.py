@@ -151,7 +151,7 @@ class CoachingMixin:
         if clean and best_prev and lap_time > best_prev * 1.04:
             clean = False
         if used > 0.2 and not st["pit"] and not st["yellow"]:
-            self.event_fuel.append(used)
+            self.event_fuel.append((used, lap_time))
         self.my_laps.append({"time": lap_time if clean else -1, "raw": lap_time,
                              "fuel": used if used > 0 and not st["pit"] else None, **st})
         self.fuel_at_lap_start = fuel

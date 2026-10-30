@@ -218,7 +218,7 @@ def test_setup_fuel_warning_in_practice(eng):
         tick(eng)
     warn = [t for t in texts(eng) if "Ojo con la carrera" in t]
     assert len(warn) == 1, texts(eng)
-    assert "12 litros" in warn[0] and "41" in warn[0]          # 3.09 * 13 + 0.5 = 40.7
+    assert "12.0 litros" in warn[0] and "39.7" in warn[0]      # 3.09 * 12 + 1.55 de largada lanzada + 1
 
 
 def test_race_briefing_on_grid(eng):
@@ -237,7 +237,33 @@ def test_race_fuel_question(eng):
     _event(eng, current=0)
     eng.ask("¿cuánto cargo para la carrera?")
     tick(eng)
-    assert "carga 41 litros" in texts(eng)[-1]
+    assert "carga 39.7 litros" in texts(eng)[-1]
+
+
+def test_slow_practice_laps_do_not_lower_race_fuel(eng):
+    """Hungaroring: la práctica lenta midió 2.32 L y pidió 38; en carrera faltó 1 L"""
+    tick(eng)
+    _event(eng, current=0)
+    eng.refs = {"fuel_per_lap": 2.585, "corners": []}
+    eng.ir.v["SessionInfo"]["Sessions"][1]["SessionLaps"] = "15"
+    eng.ir.v["WeekendInfo"]["WeekendOptions"]["StandingStart"] = 1
+    eng.event_fuel.extend([(2.30, 123.6), (2.32, 124.0), (2.35, 123.9)])
+    assert eng.fuel_per_lap_estimate() == pytest.approx(2.585)
+    plan = eng.race_plan()
+    assert plan["need"] == pytest.approx(40.0)     # gastó 38.96: un litro de margen, no más
+
+
+def test_practice_fuel_warning_repeats_when_consumption_rises(eng):
+    tick(eng)
+    _event(eng, current=0)
+    eng.is_race = False
+    for _ in range(12):
+        tick(eng)
+    eng.refs = {"fuel_per_lap": 3.4, "corners": []}   # vueltas más rápidas: gasta más
+    for _ in range(12):
+        tick(eng)
+    warn = [t for t in texts(eng) if "Ojo con la carrera" in t]
+    assert len(warn) == 2 and "Carga 43.5" in warn[1], texts(eng)
 
 
 def test_answers_are_spoken_while_muted(eng):

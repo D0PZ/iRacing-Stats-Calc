@@ -685,10 +685,11 @@ class TelemetryAnalyzer:
 
     def _fuel(self):
         res = self.result
-        used = [l.fuel_used for l in res.laps if not l.pit and l.fuel_used > 0.3]
+        from app import session_plan as sp
+        used = [(l.fuel_used, l.time) for l in res.laps if not l.pit and l.fuel_used > 0.3]
         if not used:
             return
-        res.fuel_per_lap = float(np.median(used))
+        res.fuel_per_lap = float(sp.race_pace_fuel(used))
         try:
             sessions = self.info["SessionInfo"]["Sessions"]
             race = next(s for s in sessions if str(s.get("SessionType", "")).lower().startswith("race"))
@@ -696,14 +697,16 @@ class TelemetryAnalyzer:
         except Exception:
             race_laps = 0
         if race_laps:
-            need = res.fuel_per_lap * (race_laps + 1) + 0.5
+            standing = self._standing_start()
+            need = sp.race_fuel(res.fuel_per_lap, race_laps, standing)
+            start = self._start_fuel()
+            short = bool(start) and start < sp.race_use(res.fuel_per_lap, race_laps, standing)
             res.recommendations.append(Recommendation(
-                "Combustible", 1 if self._start_fuel() and self._start_fuel() < need else 3,
+                "Combustible", 1 if short else 3,
                 f"Gastas {res.fuel_per_lap:.2f} L por vuelta",
                 f"Para {race_laps} vueltas sin parar necesitas cargar al menos {need:.1f} L "
-                f"(incluye la vuelta de formación y un margen de 0.5 L)."
-                + (f" Saliste con {self._start_fuel():.1f} L, lo que obliga a parar en pits."
-                   if self._start_fuel() and self._start_fuel() < need else "")))
+                f"(a ritmo de carrera, con la largada y un litro de margen)."
+                + (f" Saliste con {start:.1f} L, lo que obliga a parar en pits." if short else "")))
 
     def _session_plan(self, valid: List[Lap]):
         from app import session_plan as sp
@@ -730,11 +733,17 @@ class TelemetryAnalyzer:
             fuel.update(qualy=sp.qualy_fuel(res.fuel_per_lap, q_laps), qualy_laps=q_laps)
             r_laps = sp.session_laps(self.info, "race")
             if r_laps:
-                fuel.update(race=sp.race_fuel(res.fuel_per_lap, r_laps), race_laps=r_laps)
+                fuel.update(race=sp.race_fuel(res.fuel_per_lap, r_laps, self._standing_start()), race_laps=r_laps)
         res.plan_lines = sp.describe(res.pad_plan, res.brake_profile, fuel) if (res.pad_plan or fuel) else []
         if res.plan_lines:
             res.recommendations.append(Recommendation("Plan", 1, "Plan para qualy y carrera",
                                                       " ".join(res.plan_lines)))
+
+    def _standing_start(self) -> Optional[bool]:
+        try:
+            return bool(int(self.info["WeekendInfo"]["WeekendOptions"]["StandingStart"]))
+        except Exception:
+            return None
 
     def _start_fuel(self) -> Optional[float]:
         f = self.files[0].get("FuelLevel")

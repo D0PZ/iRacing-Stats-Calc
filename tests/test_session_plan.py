@@ -30,7 +30,17 @@ def test_keeps_pad_when_already_at_pedal_limit():
 
 def test_fuel_plans():
     assert sp.qualy_fuel(3.09, 2) == pytest.approx(9.77)
-    assert sp.race_fuel(3.09, 12) == pytest.approx(40.67)
+    assert sp.race_fuel(3.09, 12) == pytest.approx(39.7)          # lanzada: media vuelta tras el pace car
+    # Hungaroring, largada detenida: la carrera gastó 38.96 L (0.16 en la largada), +1 L de margen
+    assert sp.race_fuel(2.585, 15, standing_start=True) == pytest.approx(40.0)
+
+
+def test_race_pace_fuel_ignores_slow_laps():
+    # Práctica lenta (2:03-2:04) gasta menos que el ritmo de carrera (2:00)
+    laps = [(2.30, 123.6), (2.32, 124.0), (2.55, 120.7), (2.58, 121.0), (2.52, 120.9)]
+    assert sp.race_pace_fuel(laps) == pytest.approx(2.55)
+    assert sp.race_pace_fuel([(2.4, 121.0)]) == 2.4
+    assert sp.race_pace_fuel([]) is None
 
 
 def test_pad_options_extend_from_config():

@@ -8,7 +8,8 @@ fuertes, el ABS quede por encima de lo que realmente alcanzas a pisar. Al cambia
 delantera cambia el reparto de frenada, así que se recalcula el balance para mantenerlo.
 """
 
-from typing import Dict, List, Optional
+import math
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -86,9 +87,36 @@ def qualy_fuel(per_lap: float, qualy_laps: int) -> float:
     return per_lap * (qualy_laps + 1) + 0.5
 
 
-def race_fuel(per_lap: float, race_laps: int) -> float:
-    """Vueltas de carrera + vuelta de formación + 0.5 L de margen"""
-    return per_lap * (race_laps + 1) + 0.5
+FUEL_MARGIN = 1.0           # litros sobre el consumo real: lo justo para no regalar peso
+STANDING_START_FUEL = 0.2   # largada detenida, del grid a la verde (Hungaroring: 0.16 L medidos)
+
+
+def formation_fuel(per_lap: float, standing_start: Optional[bool]) -> float:
+    """Combustible antes de la verde: detenida casi nada; lanzada, una vuelta lenta tras el pace car"""
+    return STANDING_START_FUEL if standing_start else per_lap / 2
+
+
+def race_use(per_lap: float, race_laps: int, standing_start: Optional[bool] = None) -> float:
+    """Lo que gasta la carrera: vueltas a ritmo + largada, sin margen"""
+    return per_lap * race_laps + formation_fuel(per_lap, standing_start)
+
+
+def race_fuel(per_lap: float, race_laps: int, standing_start: Optional[bool] = None) -> float:
+    """Carga para la carrera: consumo + 1 L de margen, redondeado hacia arriba a 0.1 L"""
+    return math.ceil(round((race_use(per_lap, race_laps, standing_start) + FUEL_MARGIN) * 10, 6)) / 10
+
+
+def race_pace_fuel(laps: Iterable[Tuple[float, float]]) -> Optional[float]:
+    """Litros por vuelta a ritmo de carrera (mediana). laps: (litros, tiempo).
+    Las vueltas lentas (práctica tranquila, salidas, tráfico) gastan menos y harían quedar corto:
+    si hay al menos 2 vueltas a menos de 2% de la mejor, se usan solo esas."""
+    laps = [(f, t) for f, t in laps if f > 0]
+    if not laps:
+        return None
+    best = min((t for _, t in laps if t > 0), default=None)
+    fast = [f for f, t in laps if best and 0 < t <= best * 1.02]
+    vals = sorted(fast if len(fast) >= 2 else [f for f, _ in laps])
+    return vals[len(vals) // 2]
 
 
 def session_laps(session_info: dict, kind: str) -> Optional[int]:

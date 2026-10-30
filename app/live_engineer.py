@@ -51,8 +51,9 @@ class LiveEngineer(FuelMixin, ClaudeMixin, SetupCoachMixin, RecordingMixin, Riva
         self._stop = threading.Event()
         self.questions: "queue.Queue[str]" = queue.Queue()
         self._emit_lock = threading.RLock()
-        self.event_fuel: deque = deque(maxlen=10)   # litros por vuelta medidos en este evento
+        self.event_fuel: deque = deque(maxlen=10)   # (litros, tiempo) de cada vuelta medida en este evento
         self.briefed_sessions = set()
+        self.fuel_warned: dict = {}   # sesión -> litros que ya se avisaron para la carrera
         self.muted_until = 0.0
         self.last_spoken = ""
         self.on_track = False

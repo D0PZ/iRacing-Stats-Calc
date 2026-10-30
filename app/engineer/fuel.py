@@ -4,18 +4,17 @@ import math
 from typing import Optional
 
 from app.engineer.common import P_CAR, P_FLAG, P_INFO, irsdk
+from app.session_plan import race_fuel, race_pace_fuel, race_use
 
 
 class FuelMixin:
     # ------------------------------------------- briefing y plan de carrera
     def fuel_per_lap_estimate(self) -> Optional[float]:
-        """Consumo de este evento (mediana) o el guardado del análisis de .ibt de esta pista y auto"""
-        if len(self.event_fuel) >= 2:
-            vals = sorted(self.event_fuel)
-            return vals[len(vals) // 2]
-        if self.refs and self.refs.get("fuel_per_lap"):
-            return float(self.refs["fuel_per_lap"])
-        return None
+        """Consumo a ritmo de carrera de este evento o el del análisis de .ibt de esta pista y auto,
+        el mayor de los dos: una práctica tranquila no puede bajar el consumo de la carrera"""
+        measured = race_pace_fuel(self.event_fuel) if len(self.event_fuel) >= 2 else None
+        saved = float(self.refs["fuel_per_lap"]) if self.refs and self.refs.get("fuel_per_lap") else None
+        return max((v for v in (measured, saved) if v), default=None)
 
     def race_plan(self) -> Optional[dict]:
         """Vueltas de la carrera del evento y combustible necesario para hacerla sin parar"""
@@ -35,8 +34,17 @@ class FuelMixin:
         per_lap = self.fuel_per_lap_estimate()
         if not laps:
             return None
-        need = per_lap * (laps + 1) + 0.5 if per_lap else None   # +1 vuelta de formación, +0.5 L de margen
-        return {"laps": laps, "per_lap": per_lap, "need": need}
+        if not per_lap:
+            return {"laps": laps, "per_lap": None, "need": None, "use": None}
+        standing = self._standing_start()
+        return {"laps": laps, "per_lap": per_lap, "need": race_fuel(per_lap, laps, standing),
+                "use": race_use(per_lap, laps, standing)}
+
+    def _standing_start(self) -> Optional[bool]:
+        try:
+            return bool(int(self.ir["WeekendInfo"]["WeekendOptions"]["StandingStart"]))
+        except Exception:
+            return None
 
     def _setup_fuel(self) -> Optional[float]:
         try:
@@ -54,34 +62,38 @@ class FuelMixin:
         ir = self.ir
         plan = self.race_plan()
         key = (self.track_name, self.session_num)
-        if key in self.briefed_sessions or not plan:
+        if not plan:
             return
         state = ir["SessionState"] or 0
         if self.is_race:
-            if state > irsdk.SessionState.parade_laps:
+            if key in self.briefed_sessions or state > irsdk.SessionState.parade_laps:
                 return
             self.briefed_sessions.add(key)
             self.emit(self._briefing_text(plan), P_FLAG, ttl=60)
         elif plan["need"]:
-            # Práctica o clasificación: avisar si el setup no trae combustible para la carrera
+            # Práctica o clasificación: avisar si el setup no trae combustible para la carrera,
+            # y de nuevo si el consumo medido sube (las vueltas más rápidas gastan más)
             setup_fuel = self._setup_fuel()
-            if setup_fuel is not None and setup_fuel + 0.1 < plan["need"]:
-                self.briefed_sessions.add(key)
+            warned = self.fuel_warned.get(key)
+            if (setup_fuel is not None and setup_fuel + 0.1 < plan["need"]
+                    and (warned is None or plan["need"] >= warned + 1.0)):
+                self.fuel_warned[key] = plan["need"]
                 self.emit(f"Ojo con la carrera: son {plan['laps']} vueltas, gastas {plan['per_lap']:.2f} litros "
-                          f"por vuelta y tu setup tiene {setup_fuel:.0f} litros. Para no parar necesitas "
-                          f"{plan['need']:.0f}. Cámbialo en el garage antes de la carrera.", P_FLAG, ttl=60)
+                          f"por vuelta a ritmo de carrera y tu setup tiene {setup_fuel:.1f} litros. Carga "
+                          f"{plan['need']:.1f}, con un litro de margen. Cámbialo en el garage antes de la carrera.",
+                          P_FLAG, ttl=60)
 
     def _briefing_text(self, plan: dict) -> str:
         ir = self.ir
         parts = [f"Briefing: {plan['laps']} vueltas."]
         fuel = ir["FuelLevel"] or 0.0
         if plan["need"]:
-            if fuel + 0.1 < plan["need"]:
-                laps_fuel = fuel / plan["per_lap"]
-                parts.append(f"Llevas {fuel:.0f} litros y necesitas {plan['need']:.0f}: alcanza para unas "
-                             f"{laps_fuel:.0f} vueltas, vas a tener que parar o ahorrar.")
+            spare = fuel - plan["use"]
+            if spare < 0:
+                parts.append(f"Llevas {fuel:.1f} litros y la carrera gasta {plan['use']:.1f}: te faltan "
+                             f"{-spare:.1f}, vas a tener que parar o ahorrar.")
             else:
-                parts.append(f"Combustible bien: {fuel:.0f} litros, te sobran {fuel - plan['need'] + 0.5:.1f}.")
+                parts.append(f"Combustible bien: {fuel:.1f} litros, te sobran {spare:.1f}.")
         if self.limits and self.limits.zones:
             hot = sorted(self.limits.zones, key=lambda z: -z.get("offs", 0))[:2]
             hot = [z for z in hot if z.get("offs", 0) >= 2]

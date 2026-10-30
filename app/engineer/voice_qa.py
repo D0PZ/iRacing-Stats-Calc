@@ -92,7 +92,7 @@ class VoiceQAMixin:
             if not plan["need"]:
                 return f"La carrera es de {plan['laps']} vueltas. Haz un par de vueltas para medir el consumo."
             return (f"La carrera es de {plan['laps']} vueltas. Gastas {plan['per_lap']:.2f} litros por vuelta: "
-                    f"carga {plan['need']:.0f} litros para hacerla sin parar.")
+                    f"carga {plan['need']:.1f} litros, con un litro de margen.")
 
         if has("combustible", "gasolina", "bencina", "nafta", "fuel", "litros"):
             fuel, per_lap, left = self._fuel_numbers()
