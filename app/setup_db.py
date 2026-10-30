@@ -16,11 +16,15 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.paths import data_dir
+from app.tire_model import (BOUNDS, NOISE_MID, NOISE_SPREAD, PRIOR, UNDERINFLATED, bayes_fit, camber_error,
+                             worked)
+from app.units import PRESSURE_CLICK_KPA, in_unit, length_mm, pressure_kpa, pressure_unit, snap_pressure, temps_c
 from app.util import WHEELS, atomic_write_json, nums as _nums, slug as _slug
 
 BASE = data_dir("setups")
 MAX_STINTS = 300
-MIN_FIT_STINTS = 3   # con menos salidas medidas, una recta no es confiable: se usa la última + el modelo
+RECENCY = 0.85       # peso de cada salida anterior en los ideales: lo reciente pesa más (pista y goma evolucionan)
+MAX_IDEAL_MOVE = 0.5  # grados: el ideal no se aleja más que esto de tu camber actual (datos ruidosos)
 # Campos de medición (no son setup): se guardan aparte
 MEASURE_KEYS = ("LastTemps", "LastHotPressure", "TreadRemaining", "UpdateCount")
 # Campos que importan para la conversación (para no gastar tokens con todo el setup)
@@ -52,13 +56,13 @@ def measurements(setup: dict) -> Optional[Dict[str, dict]]:
         temps = None
         for k, v in t.items():
             if k.startswith("LastTemps"):
-                vals, order = _nums(v), k[len("LastTemps"):]
+                vals, order = temps_c(v), k[len("LastTemps"):]
                 if len(vals) == 3 and sorted(order) == ["I", "M", "O"]:
                     named = dict(zip(order, vals))
-                    temps = [named["O"], named["M"], named["I"]]
+                    temps = [round(named[x], 1) for x in "OMI"]
         wear = _nums(t.get("TreadRemaining", ""))
-        hot = _nums(t.get("LastHotPressure", ""))
-        out[w] = {"temps": temps, "hot": hot[0] if hot else None, "wear_min": min(wear) if wear else None}
+        hot = pressure_kpa(t.get("LastHotPressure"))
+        out[w] = {"temps": temps, "hot": None if hot is None else round(hot, 1), "wear_min": min(wear) if wear else None}
     vals = [x for d in out.values() if d["temps"] for x in d["temps"]]
     if len(vals) != 12 or max(vals) - min(vals) < 2:
         return None   # iRacing no actualizó las temperaturas (no hubo salida medida)
@@ -66,13 +70,16 @@ def measurements(setup: dict) -> Optional[Dict[str, dict]]:
 
 
 def wheel_setup(flat: Dict[str, str], wheel: str) -> dict:
-    """Camber y presión en frío de una rueda desde el setup aplanado"""
+    """Camber, presión en frío (kPa), toe (mm) y unidad de presión de una rueda desde el setup aplanado"""
     key = WHEELS[wheel]
     camber = next((_nums(v)[0] for k, v in flat.items() if key in k and k.endswith("Camber") and _nums(v)), None)
-    cold = next((_nums(v)[0] for k, v in flat.items()
-                 if key in k and k.endswith(("StartingPressure", "ColdPressure")) and _nums(v)), None)
-    toe = next((_nums(v)[0] for k, v in flat.items() if key in k and k.endswith("ToeIn") and _nums(v)), None)
-    return {"camber": camber, "cold": cold, "toe": toe}
+    cold_text = next((v for k, v in flat.items()
+                      if key in k and k.endswith(("StartingPressure", "ColdPressure")) and _nums(v)), None)
+    toe = next((length_mm(v) for k, v in flat.items() if key in k and k.endswith("ToeIn") and _nums(v)), None)
+    if toe is None and wheel[1] == "F":   # toe delantero total del eje (992 Cup): la mitad por rueda
+        total = next((length_mm(v) for k, v in flat.items() if k.endswith("Front > ToeIn") and _nums(v)), None)
+        toe = None if total is None else total / 2
+    return {"camber": camber, "cold": pressure_kpa(cold_text), "toe": toe, "unit": pressure_unit(cold_text)}
 
 
 def key_setup(flat: Dict[str, str]) -> Dict[str, str]:
@@ -121,10 +128,13 @@ class SetupDB:
             "tiempos": [round(float(t), 3) for t in lap_times if t and t > 0],      # en orden, para pruebas A/B
             "combustible_inicio": None if fuel_start is None else round(float(fuel_start), 2),
         }
-        # No duplicar la misma medición (p. ej. reporte en pits + salir del auto)
-        if self.stints and rec["medicion"] and self.stints[-1].get("medicion") == rec["medicion"] \
-                and self.stints[-1].get("setup") == rec["setup"]:
-            return self.stints[-1]
+        # Misma medición que la salida anterior: el garage no registró temperaturas nuevas (iRacing no
+        # refrescó el setup). Las vueltas sí son nuevas y se guardan; la medición no se cuenta dos veces.
+        last = self.stints[-1] if self.stints else None
+        if last and rec["medicion"] and last.get("medicion") == rec["medicion"] and last.get("setup") == rec["setup"]:
+            if not laps:
+                return last
+            rec["medicion"] = None
         self.stints.append(rec)
         self.data["stints"] = self.stints[-MAX_STINTS:]
         self.save()
@@ -154,74 +164,116 @@ class SetupDB:
         timed = [s for s in self.stints if s.get("ritmo")]
         return min(timed, key=lambda s: s["ritmo"]) if timed else None
 
-    def ideals(self, targets: Dict[str, float], sens: Optional[Dict[str, dict]] = None) -> Dict[str, dict]:
+    def ideals(self, targets: Dict[str, float], sens: Optional[Dict[str, dict]] = None,
+               unit: Optional[str] = None, limits: Optional[dict] = None) -> Dict[str, dict]:
         """
-        Presión en frío y camber ideales por rueda usando todas las salidas medidas:
-        - presión: centro = promedio de los bordes (contacto plano)
-        - camber: interior sobre exterior = objetivo del eje
-        Con 2+ salidas con valores distintos se ajusta una recta a tus datos; con una sola,
-        se usa la sensibilidad del modelo de neumáticos.
+        Presión en frío y camber ideales por rueda con todas las salidas medidas en que las gomas trabajaron:
+        - presión: centro = promedio de los bordes (contacto plano), en pasos del garage
+        - camber: interior sobre exterior = objetivo del eje, con el toe que tienes ahora
+        Regresión bayesiana por rueda (spread ~ camber + toe, centro ~ presión) que parte de las
+        sensibilidades del modelo de neumáticos: con una salida equivale a "última medición + sensibilidad",
+        con varias manda tu data, y si cambiaste camber y toe a la vez no le atribuye todo al camber.
+        Las salidas recientes pesan más. limits: perfil del auto (mínima más rápida, máximo camber).
+        targets: {"front", "rear", "learned"} (learned = objetivo sacado de tus tiempos)
         """
+        limits = limits or {}
         out = {}
+        stints = [s for s in self.measured() if worked(s["medicion"], s.get("pista_c"))]
         for w in WHEELS:
             rows = []
-            for s in self.measured():
+            for s in stints:
                 m = s["medicion"].get(w) or {}
                 ws = wheel_setup(s["setup"], w)
                 if m.get("temps") and (ws["cold"] is not None or ws["camber"] is not None):
                     o, mid, i = m["temps"]
-                    rows.append({"cold": ws["cold"], "camber": ws["camber"], "mid": mid - (o + i) / 2,
-                                 "spread": i - o, "hot": m.get("hot"), "temps": m["temps"]})
+                    rows.append(dict(ws, mid=mid - (o + i) / 2, spread=i - o, hot=m.get("hot"), temps=m["temps"]))
             if not rows:
                 continue
             target = targets["front" if w[1] == "F" else "rear"]
-            s_w = (sens or {}).get(w, {"camber": 15.0, "pressure": 0.35})
+            s_w = dict({k: mu for k, (mu, _) in PRIOR.items()}, **((sens or {}).get(w) or {}))
             last = rows[-1]
-            res = {"salidas": len(rows), "metodo": "última salida"}
-            # Presión
-            pr = [(r["cold"], r["mid"]) for r in rows if r["cold"] is not None]
-            if len(pr) >= MIN_FIT_STINTS and len({c for c, _ in pr}) >= 2 \
-                    and max(c for c, _ in pr) - min(c for c, _ in pr) >= 2:
-                b, a = np.polyfit([c for c, _ in pr], [m for _, m in pr], 1)
-                if b > 0.05:
-                    lo, hi = min(c for c, _ in pr) - 15, max(c for c, _ in pr) + 15
-                    res["presion_frio"] = round(float(np.clip(-a / b, lo, hi)))
-                    res["metodo"] = "ajuste con tus salidas"
-            if "presion_frio" not in res and last["cold"] is not None:
-                res["presion_frio"] = round(last["cold"] - last["mid"] / s_w["pressure"])
-            # Camber
-            cr = [(r["camber"], r["spread"]) for r in rows if r["camber"] is not None]
-            if len(cr) >= MIN_FIT_STINTS and len({c for c, _ in cr}) >= 2 \
-                    and max(c for c, _ in cr) - min(c for c, _ in cr) >= 0.1:
-                b, a = np.polyfit([c for c, _ in cr], [sp for _, sp in cr], 1)
-                if b < -2:   # más camber negativo -> más diferencia interior/exterior
-                    lo, hi = min(c for c, _ in cr) - 0.8, max(c for c, _ in cr) + 0.8
-                    res["camber"] = round(float(np.clip((target - a) / b, lo, hi)), 1)
-                    res["metodo"] = "ajuste con tus salidas"
-            if "camber" not in res and last["camber"] is not None:
-                res["camber"] = round(last["camber"] + (last["spread"] - target) / s_w["camber"], 1)
+            u = unit or last["unit"]
+            res = {"salidas": len(rows), "metodo": "última salida" if len(rows) == 1 else "ajuste con tus salidas",
+                   "unidad": u}
+            # Presión: centro = b + s_p·(frío − media)
+            pr = [r for r in rows if r["cold"] is not None]
+            if pr:
+                x = np.array([r["cold"] for r in pr])
+                x0 = float(x.mean())
+                b, s_p = bayes_fit(np.column_stack([np.ones(len(x)), x - x0]), [r["mid"] for r in pr],
+                                   [0.0, s_w["pressure"]], [50.0, PRIOR["pressure"][1]], NOISE_MID,
+                                   RECENCY ** np.arange(len(pr))[::-1])
+                s_p = max(s_p, BOUNDS["pressure"][0])
+                ideal = float(np.clip(x0 - b / s_p, x.min() - 15, x.max() + 15))
+                floor = limits.get("cold_min_kpa")
+                if floor is not None:
+                    floor = snap_pressure(floor)
+                    if limits.get("min_pressure_fastest"):
+                        # La mínima, salvo que lo MEDIDO en la mínima muestre el centro claramente frío
+                        near = [r["mid"] for r in pr if r["cold"] <= floor + PRESSURE_CLICK_KPA / 2]
+                        under = bool(near) and float(np.mean(near[-3:])) < -UNDERINFLATED
+                        ideal = floor + (PRESSURE_CLICK_KPA if under else 0.0)
+                        res["metodo_presion"] = "mínima del garage (manual del auto)"
+                    ideal = max(ideal, floor)
+                res["presion_frio"] = in_unit(snap_pressure(ideal), u)
+            # Camber: spread = a + s_c·(−(camber − media)) + s_t·(toe − media)
+            cr = [r for r in rows if r["camber"] is not None]
+            if cr:
+                cam = np.array([r["camber"] for r in cr])
+                c0 = float(cam.mean())
+                cols, prior_m, prior_sd = [np.ones(len(cr)), -(cam - c0)], [0.0, s_w["camber"]], [50.0, PRIOR["camber"][1]]
+                use_toe = all(r["toe"] is not None for r in cr)
+                if use_toe:
+                    toe = np.array([r["toe"] for r in cr])
+                    t0 = float(toe.mean())
+                    cols.append(toe - t0)
+                    prior_m.append(s_w["toe"])
+                    prior_sd.append(PRIOR["toe"][1])
+                coef = bayes_fit(np.column_stack(cols), [r["spread"] for r in cr], prior_m, prior_sd, NOISE_SPREAD,
+                                 RECENCY ** np.arange(len(cr))[::-1])
+                toe_term = coef[2] * (cr[-1]["toe"] - t0) if use_toe else 0.0
+                s_c, now = max(coef[1], BOUNDS["camber"][0]), cr[-1]["camber"]
+                spread_now = coef[0] - s_c * (now - c0) + toe_term          # lo que da tu camber actual, según el ajuste
+                err = camber_error(spread_now, target, limits, bool(targets.get("learned")))
+                ideal = now + err / s_c                                    # + quita camber negativo
+                lo, hi = max(cam.min() - 0.5, now - MAX_IDEAL_MOVE), min(cam.max() + 0.5, now + MAX_IDEAL_MOVE)
+                lim = limits.get("camber_front" if w[1] == "F" else "camber_rear")
+                if lim:
+                    lo, hi = max(lo, lim[0]), min(hi, lim[1])
+                res["camber"] = round(float(np.clip(ideal, lo, hi)), 1)
+                if use_toe:
+                    res["toe_mm"] = round(cr[-1]["toe"], 2)
             res["ultima_medicion"] = {"ext_centro_int": [round(x) for x in last["temps"]],
-                                      "presion_caliente": last["hot"]}
+                                      "presion_caliente": in_unit(last["hot"], u)}
             out[w] = res
         return out
 
-    def summary(self, targets: Dict[str, float], sens=None, last_n: int = 3) -> dict:
+    def pressure_unit(self) -> str:
+        """Unidad de presión del garage en la última salida guardada"""
+        for s in reversed(self.stints):
+            u = wheel_setup(s.get("setup", {}), "LF")
+            if u["cold"] is not None:
+                return u["unit"]
+        return "kPa"
+
+    def summary(self, targets: Dict[str, float], sens=None, last_n: int = 3, limits: Optional[dict] = None) -> dict:
         """Resumen compacto para el ingeniero y para Claude"""
         if not self.stints:
             return {}
+        unit = self.pressure_unit()
         recent = []
         for s in self.stints[-last_n:]:
             item = {"fecha": s["fecha"], "sesion": s.get("sesion"), "vueltas": s["vueltas"], "mejor": s.get("mejor"),
                     "ritmo": s.get("ritmo"), "pista_c": s.get("pista_c"), "setup": key_setup(s["setup"])}
             if s.get("medicion"):
-                item["medicion"] = {w: {"ext_centro_int": [round(x) for x in d["temps"]], "caliente": d["hot"]}
+                item["medicion"] = {w: {"ext_centro_int": [round(x) for x in d["temps"]], "caliente": in_unit(d["hot"], unit)}
                                     for w, d in s["medicion"].items() if d.get("temps")}
             if s.get("manejo"):
                 item["manejo"] = s["manejo"]
             recent.append(item)
         best = self.best()
-        out = {"salidas_guardadas": len(self.stints), "ultimas": recent,
-               "ideales_por_rueda": self.ideals(targets, sens)}
+        out = {"salidas_guardadas": len(self.stints), "unidad_presion": unit, "ultimas": recent,
+               "ideales_por_rueda": self.ideals(targets, sens, unit, limits)}
         if best:
             out["mejor_salida"] = {"fecha": best["fecha"], "ritmo": best["ritmo"], "mejor": best["mejor"],
                                    "setup": key_setup(best["setup"])}

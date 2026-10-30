@@ -90,12 +90,19 @@ class ClaudeMixin:
         snap["clima"] = {"pista_c": r1(ir["TrackTempCrew"], 0), "aire_c": r1(ir["AirTemp"], 0),
                          "humedad_pista": ir["TrackWetness"]}
         try:
-            from app.tire_model import measured, read_setup
-            data = read_setup(ir["CarSetup"] or {})
+            from app.tire_model import measured
+            from app.units import in_unit
+            data, _, worked = self._tire_data()
+            unit = (data.get("LF") or {}).get("unit", "kPa")
+            snap["unidad_presion"] = unit
             if measured(data):
                 snap["neumaticos_ultima_entrada_pits"] = {
-                    c: {"ext_centro_int_c": [round(x) for x in d["temps"]], "presion_caliente_kpa": d["hot"],
-                        "presion_frio_kpa": d["cold"], "camber": d["camber"]} for c, d in data.items()}
+                    c: {"ext_centro_int_c": [round(x) for x in d["temps"]],
+                        "presion_caliente": in_unit(d["hot"], unit), "presion_frio": in_unit(d["cold"], unit),
+                        "camber": d["camber"], "toe_mm": None if d.get("toe") is None else round(d["toe"], 2)}
+                    for c, d in data.items()}
+                if not worked:
+                    snap["neumaticos_ultima_entrada_pits"]["aviso"] = "gomas frías: la medición no sirve para ajustar"
                 snap["ajustes_neumaticos_recomendados"] = self._tire_recs()
         except Exception:
             pass
@@ -160,7 +167,8 @@ class ClaudeMixin:
             pass
         if self.setup_db is not None and self.setup_db.stints:
             sens = self.tire_model.state["sens"] if self.tire_model is not None else None
-            snap["historial_esta_pista"] = self.setup_db.summary(self._tire_targets(), sens, last_n=2)
+            snap["historial_esta_pista"] = self.setup_db.summary(self._tire_targets(), sens, last_n=2,
+                                                                 limits=self._tire_limits())
         if self.tire_model is not None:
             snap["tire_targets"] = {"adelante_c": self.tire_model.target_spread("LF", self.track_name),
                                     "atras_c": self.tire_model.target_spread("LR", self.track_name)}

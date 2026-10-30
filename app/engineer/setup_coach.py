@@ -17,9 +17,18 @@ class SetupCoachMixin:
     # ------------------------------------------- base de setups por pista/auto
     def _tire_targets(self) -> Dict[str, float]:
         if self.tire_model is not None:
-            return {"front": self.tire_model.target_spread("LF", self.track_name),
-                    "rear": self.tire_model.target_spread("LR", self.track_name)}
+            m = self.tire_model
+            return {"front": m.target_spread("LF", self.track_name), "rear": m.target_spread("LR", self.track_name),
+                    "learned": m.target_source("front_spread", self.track_name) != "punto de partida"}
         return {"front": 7.0, "rear": 5.0}
+
+    def _tire_limits(self) -> dict:
+        """Límites del garage y perfil del auto (mínima más rápida, máximo camber, solo toe-in atrás)"""
+        if self.tire_model is not None:
+            return self.tire_model.limits
+        from app.tire_model import limits_for
+        from app.voice_commands import load_config
+        return limits_for(self.car_name, load_config().get("tire_limits"))
 
     def _store_stint(self, stint_laps: List[float], per_lap_events: dict, spin: float, recs: List[str]):
         if self.setup_db is None:
@@ -114,30 +123,45 @@ class SetupCoachMixin:
         recs = [r for r in recs if r["param"] not in replaced]
         return balance_model.phrases(physics) + phrases(recs)
 
-    def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
-        """Toe por rueda según cómo se comportó el auto (por sentido de curva) y tu historial"""
+    def _tire_data(self):
+        """Medición de la última entrada a pits, temperatura de pista y si las gomas trabajaron lo suficiente"""
+        from app.tire_model import measured, read_setup, worked
+        data = read_setup(self.ir["CarSetup"] or {})
+        track_temp = self.ir["TrackTempCrew"]
+        return data, track_temp, measured(data) and worked(data, track_temp)
+
+    def _toe_plan(self, laps: Optional[int] = None) -> List[dict]:
+        """Toe por rueda según cómo se comportó el auto (por sentido de curva), tus temperaturas y tu historial"""
         from app.setup_db import flatten_setup
-        from app.toe_advisor import advise, phrases
+        from app.toe_advisor import advise
         laps = laps or max(self.laps_since_setup, 1)
         history = self.setup_db.stints if self.setup_db is not None else None
-        recs = advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history)
-        return phrases(recs)
+        data, _, ok = self._tire_data()
+        temps = {c: d["temps"] for c, d in data.items()} if ok else None
+        return advise(flatten_setup(self.ir["CarSetup"] or {}), laps, self.side_counts, history, temps,
+                      rear_min=self._tire_limits().get("rear_toe_min_mm"))
+
+    def _toe_recs(self, laps: Optional[int] = None) -> List[str]:
+        from app.setup_db import flatten_setup
+        from app.toe_advisor import phrases, toe_display
+        return phrases(self._toe_plan(laps), *toe_display(flatten_setup(self.ir["CarSetup"] or {})))
 
     def _ideal_phrases(self) -> List[str]:
         """Valores ideales con todo tu historial en esta pista y auto (aunque sea otra sesión)"""
         if self.setup_db is None:
             return []
         sens = self.tire_model.state["sens"] if self.tire_model is not None else None
-        ideals = self.setup_db.ideals(self._tire_targets(), sens)
+        ideals = self.setup_db.ideals(self._tire_targets(), sens, limits=self._tire_limits())
         if not ideals:
             return []
+        from app.units import PRESSURE_WORDS
         names = {"LF": "delantera izquierda", "RF": "delantera derecha",
                  "LR": "trasera izquierda", "RR": "trasera derecha"}
         parts = []
         for w, r in ideals.items():
             bits = []
             if r.get("presion_frio") is not None:
-                bits.append(f"{r['presion_frio']} kilopascales en frío")
+                bits.append(f"{r['presion_frio']} {PRESSURE_WORDS[r.get('unidad', 'kPa')]} en frío")
             if r.get("camber") is not None:
                 bits.append(f"camber {r['camber']:.1f}")
             if bits:
@@ -150,22 +174,29 @@ class SetupCoachMixin:
 
     def _tire_recs(self, record_laps: Optional[List[float]] = None) -> List[str]:
         """
-        Ajustes exactos de camber y presión por rueda hacia el contacto perfecto.
-        record_laps: tiempos de la salida que acaba de terminar (para buscar tu óptimo).
+        Ajustes exactos de camber y presión por rueda hacia el contacto perfecto, coordinados con el toe:
+        si también se recomienda cambiar el toe, el camber compensa lo que ese toe moverá las temperaturas.
+        record_laps: tiempos de la salida que acaba de terminar (para aprender y buscar tu óptimo).
         """
-        from app.tire_model import TireModel, measured, read_setup
+        from app.tire_model import TireModel, limits_for, measured
+        from app.toe_advisor import plan
         from app.voice_commands import load_config
-        data = read_setup(self.ir["CarSetup"] or {})
+        data, track_temp, ok = self._tire_data()
         if not measured(data):
             return self._ideal_phrases()   # sesión nueva: lo que sabemos de esta pista con este auto
         car = self.car_name or "auto"
         if self.tire_model is None or self.tire_model.car != car:
-            self.tire_model = TireModel(car, load_config().get("tire_targets"))
+            cfg = load_config()
+            self.tire_model = TireModel(car, cfg.get("tire_targets"), limits_for(car, cfg.get("tire_limits")))
         m = self.tire_model
+        self._temps_line = self._tire_line(data)
+        if not ok:
+            return ["Las gomas no alcanzaron temperatura en esa salida: la medición no sirve para camber ni "
+                    "presiones. Dame al menos tres vueltas a ritmo antes de entrar."] + self._ideal_phrases()
         if record_laps is not None:
-            m.learn(data)
-            m.record_stint(data, record_laps, self.track_name)
-        out = m.phrases(m.recommend(data, self.track_name))
+            m.learn(data, track_temp)
+            m.record_stint(data, record_laps, self.track_name, track_temp)
+        out = m.phrases(m.recommend(data, self.track_name, toe_plan=plan(self._toe_plan())))
         front, rear = m.target_spread("LF", self.track_name), m.target_spread("LR", self.track_name)
         out.append(f"Objetivo interior sobre exterior: {front:.1f} grados adelante y {rear:.1f} atrás, "
                    f"{m.target_source('front_spread', self.track_name)}.")
@@ -192,65 +223,28 @@ class SetupCoachMixin:
 
     _nums = staticmethod(nums)
 
-    def _tire_analysis(self, setup: dict) -> List[str]:
-        """Temperaturas de la última salida (iRacing las actualiza al entrar a pits)"""
-        temps, press = {}, {}
-        for path, value in self._walk(setup):
-            corner = next((p for p in path if p in ("LeftFront", "RightFront", "LeftRear", "RightRear")), None)
-            if not corner:
+    @staticmethod
+    def _tire_line(data) -> str:
+        """Para el reporte: O/M/I, presiones, camber y toe de cada rueda"""
+        from app.tire_model import NAMES
+        from app.units import fmt_length, fmt_pressure
+        parts = []
+        for c, d in data.items():
+            if not d["temps"]:
                 continue
-            key = path[-1]
-            if key.startswith("LastTemps"):
-                vals = self._nums(value)
-                if len(vals) == 3:
-                    order = key[len("LastTemps"):]  # OMI o IMO
-                    named = dict(zip(order, vals))
-                    if all(k in named for k in "OMI"):
-                        temps[corner] = named
-            elif key == "LastHotPressure":
-                v = self._nums(value)
-                if v:
-                    press[corner] = (v[0], str(value).split()[-1] if " " in str(value) else "")
-        recs = []
-        all_vals = [v for t in temps.values() for v in t.values()]
-        if not temps or max(all_vals) - min(all_vals) < 2:
-            return recs  # sin servicio en pits: temperaturas no actualizadas
-        es = {"LeftFront": "delantera izquierda", "RightFront": "delantera derecha",
-              "LeftRear": "trasera izquierda", "RightRear": "trasera derecha"}
-        for axle, pair in (("delantero", ("LeftFront", "RightFront")), ("trasero", ("LeftRear", "RightRear"))):
-            spreads = [temps[c]["I"] - temps[c]["O"] for c in pair if c in temps]
-            if not spreads:
-                continue
-            spread = sum(spreads) / len(spreads)
-            if spread > 12:
-                recs.append(f"Camber {axle}: el interior está {spread:.0f} grados más caliente que el exterior. "
-                            f"Quita camber negativo, unos 0.2 a 0.3 grados.")
-            elif spread < 3:
-                recs.append(f"Camber {axle}: el interior solo {spread:.0f} grados sobre el exterior. "
-                            f"Agrega camber negativo, unos 0.2 a 0.3 grados.")
-        for c, t in temps.items():
-            edges = (t["I"] + t["O"]) / 2
-            diff = t["M"] - edges
-            if diff > 4:
-                recs.append(f"Presión {es[c]}: el centro está {diff:.0f} grados sobre los bordes, "
-                            f"está sobreinflada. Baja unos 3 a 5 kilopascales.")
-            elif diff < -4:
-                recs.append(f"Presión {es[c]}: el centro está {-diff:.0f} grados bajo los bordes, "
-                            f"está baja. Sube unos 3 a 5 kilopascales.")
-        front = [sum(temps[c].values()) / 3 for c in ("LeftFront", "RightFront") if c in temps]
-        rear = [sum(temps[c].values()) / 3 for c in ("LeftRear", "RightRear") if c in temps]
-        if front and rear:
-            fa, ra = sum(front) / len(front), sum(rear) / len(rear)
-            self._temps_line = (f"Temperatura media: delanteras {fa:.0f}, traseras {ra:.0f}. "
-                                + ", ".join(f"{es[c]} O/M/I {t['O']:.0f}/{t['M']:.0f}/{t['I']:.0f}"
-                                            for c, t in temps.items()))
-            if fa - ra > 8:
-                recs.append("Las delanteras trabajan mucho más que las traseras: el auto tiende a subvirar. "
-                            "Ablanda la barra delantera o endurece la trasera.")
-            elif ra - fa > 8:
-                recs.append("Las traseras trabajan mucho más que las delanteras: el auto tiende a sobrevirar. "
-                            "Ablanda la barra trasera o agrega ala trasera.")
-        return recs
+            u = d.get("unit", "kPa")
+            o, mid, i = d["temps"]
+            txt = f"{NAMES[c]} O/M/I {o:.0f}/{mid:.0f}/{i:.0f} C"
+            if d["cold"] is not None:
+                txt += f", frío {fmt_pressure(d['cold'], u)} {u}"
+            if d.get("hot") is not None:
+                txt += f", caliente {fmt_pressure(d['hot'], u)} {u}"
+            if d["camber"] is not None:
+                txt += f", camber {d['camber']:.1f}"
+            if d.get("toe") is not None:
+                txt += f", toe {fmt_length(d['toe'])} mm"
+            parts.append(txt)
+        return ("Neumáticos: " + "; ".join(parts)) if parts else ""
 
     def _setup_report(self):
         laps = max(self.laps_since_setup, 1)

@@ -45,7 +45,8 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - **Reads iRacing telemetry files** directly (record in-sim with `Alt+L`); split recordings of the same session are merged
 - **Corner-by-corner analysis**: braking point, minimum/exit speed, time lost vs your best pass, understeer angle, wheelspin, lockups, ABS usage, track-limit excursions
 - **Theoretical best lap** from your best pass through each corner
-- **Tire temperatures** (outer/middle/inner under load), hot pressures and wear → camber and pressure advice
+- **Tire temperatures**: surface O/M/I on the loaded (outside) wheel of each corner, plus the carcass O/M/I iRacing
+  measures at pit entry (same as the garage) → exact per-wheel camber and cold pressure, in garage steps
 - **Setup and driving recommendations** mapped to the garage fields (ARBs, wing, camber, brake bias, TC, ABS, fuel)
 - CLI: `python -m app.telemetry_analyzer "path/to/file.ibt"`
 
@@ -55,6 +56,13 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - Attack/defend calls with gap trend ("you catch him in 3 laps"), and where a rival is faster than you
 - Tire/slide warnings, ABS overuse, in-car adjustments (brake bias, TC), fuel to the finish, laps remaining
 - Setup report every time you return to the pits (saved to `logs/`)
+- **Tire model** (O/M/I per wheel): inner−outer → camber, middle vs edges → cold pressure, both coordinated with the
+  toe advice. Sensitivities per wheel are learned with a Kalman filter that separates camber, toe and pressure
+  changes made together; ideal values use a Bayesian fit over all your runs on that track. Pressures move in the
+  garage's 0.5 psi clicks, the hot pressure is predicted with the gas law, and runs where the tires never got
+  warm are ignored. Works with metric or imperial garage units (kPa/psi, °C/°F, mm/fractions of an inch)
+- **Car profile** from the iRacing manual (Porsche 911 Cup 992.2): minimum cold pressure is the fastest, as much
+  camber as possible unless the inner edge overheats, rear toe-in only
 - Starts disk telemetry recording when you get in the car and closes it when you get out (no `Alt+L`;
   disable with `--sin-grabar`); each finished session is analyzed automatically and summarized by voice
 - Reads telemetry at iRacing's native 60 Hz (waits on the SDK data-ready event, no polling delay)
@@ -120,6 +128,7 @@ Copy `data/ingeniero.example.json` to start from every option:
 | `ptt_key` | `"insert"` | Keyboard push-to-talk |
 | `claude` | `enabled`, `backend: "claude_code"`, `model: "haiku"`, `effort: "low"` | Voice-question interpreter |
 | `tire_targets` | `front_spread 7`, `rear_spread 5`, `mid 0` | Fixed tire temperature targets (°C) instead of learned ones |
+| `tire_limits` | 992 Cup profile | Per car (key = part of the car name): `cold_min_kpa`, `cold_max_kpa`, `camber_front`/`camber_rear` `[min, max]`, `hot_window_kpa` `{"front": [a, b], "rear": [a, b]}`, `min_pressure_fastest`, `camber_bias: "max"`, `rear_toe_min_mm` |
 | `pad_options` | 992 Cup pads | Front brake-pad options per car (key = part of the car name) |
 
 Running from source, `data/` and `logs/` live in the repo folder; the built `.exe` keeps them next to itself.
@@ -167,9 +176,10 @@ iRacing-Stats-Calc/
 │   ├── progress.py / progress_view.py  # Progress per track and car
 │   ├── ab_test.py             # Statistical A/B setup tests
 │   ├── setup_db.py            # Setup database per track and car
-│   ├── tire_model.py          # Tire temperature model (camber/pressure)
+│   ├── tire_model.py          # Tire model: O/M/I -> camber, pressure and toe (Kalman, gas law, car profiles)
 │   ├── chassis_advisor.py     # ARBs, wing, spring perch
 │   ├── toe_advisor.py         # Toe per wheel
+│   ├── units.py               # Garage units: kPa/psi, °C/°F, mm/inches, 0.5 psi pressure clicks
 │   ├── balance_model.py       # Understeer gradient
 │   ├── vehicle_dynamics.py    # Physics: grip envelopes, fuel mass
 │   ├── driver_inputs.py       # Pedal and steering analysis

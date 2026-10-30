@@ -173,9 +173,12 @@ class VoiceQAMixin:
                 return " ".join(recs)
             from app.setup_db import flatten_setup
             from app.toe_advisor import read_toe
-            t = read_toe(flatten_setup(ir["CarSetup"] or {}))
-            now = ", ".join(f"{k} {v:+.1f}" for k, v in t.items())
-            return (f"Con lo que veo, no cambiaría el toe ({now} milímetros): el auto no muestra sobreviraje ni "
+            from app.toe_advisor import toe_display
+            from app.units import LENGTH_WORDS, fmt_length
+            flat = flatten_setup(ir["CarSetup"] or {})
+            t, (u, denom) = read_toe(flat), toe_display(flat)
+            now = ", ".join(f"{k} {fmt_length(v, u, denom)}" for k, v in t.items())
+            return (f"Con lo que veo, no cambiaría el toe ({now} {LENGTH_WORDS[u]}): el auto no muestra sobreviraje ni "
                     f"subviraje de entrada marcado. Dame un par de vueltas más al límite y te digo.")
 
         if has("ideal", "ideales") and has("presion", "camber", "neumatico", "setup"):
@@ -313,30 +316,32 @@ class VoiceQAMixin:
         ir = self.ir
         names = {"LF": "delantera izquierda", "RF": "delantera derecha",
                  "LR": "trasera izquierda", "RR": "trasera derecha"}
+        from app.tire_model import read_setup
+        from app.units import PRESSURE_WORDS, fmt_pressure
+        try:
+            setup = read_setup(ir["CarSetup"] or {})
+        except Exception:
+            setup = {}
+        # Unidades del garage; la telemetría siempre viene en °C y kPa
+        unit = (setup.get("LF") or {}).get("unit", "kPa")
+        to_unit = (lambda c: c * 1.8 + 32) if (setup.get("LF") or {}).get("temp_unit") == "F" else (lambda c: c)
         temps = {c: [ir[f"{c}tempC{x}"] for x in ("L", "M", "R")] for c in names}
         parts = []
         if all(v is not None for t in temps.values() for v in t) and \
                 max(max(t) for t in temps.values()) - min(min(t) for t in temps.values()) >= 2:
             def omi(c):  # exterior, centro, interior (en las izquierdas L es el exterior)
-                l, m, r = temps[c]
+                l, m, r = (to_unit(x) for x in temps[c])
                 return (l, m, r) if c[0] == "L" else (r, m, l)
             parts.append("Medidas en tu última entrada a pits, de exterior a interior: " + "; ".join(
                 f"{names[c]} {omi(c)[0]:.0f}, {omi(c)[1]:.0f} y {omi(c)[2]:.0f}" for c in names) + " grados")
-        hot = {}
-        try:
-            for path, value in self._walk(ir["CarSetup"] or {}):
-                corner = next((k for k, v in {"LF": "LeftFront", "RF": "RightFront",
-                                              "LR": "LeftRear", "RR": "RightRear"}.items() if v in path), None)
-                if corner and path[-1] == "LastHotPressure":
-                    hot[corner] = self._nums(value)[0]
-        except Exception:
-            pass
+        hot = {c: d["hot"] for c, d in setup.items() if d.get("hot") is not None}
+        p = lambda kpa: fmt_pressure(kpa, unit)                # noqa: E731
         cold = [ir[f"{c}coldPressure"] for c in names]
         if len(hot) == 4:
-            parts.append(f"presión en caliente {hot['LF']:.0f} y {hot['RF']:.0f} adelante, "
-                         f"{hot['LR']:.0f} y {hot['RR']:.0f} atrás")
+            parts.append(f"presión en caliente {p(hot['LF'])} y {p(hot['RF'])} adelante, "
+                         f"{p(hot['LR'])} y {p(hot['RR'])} atrás" + ("" if unit == "kPa" else f" {PRESSURE_WORDS[unit]}"))
         if all(c is not None for c in cold):
-            parts.append(f"en frío {cold[0]:.0f} adelante y {cold[2]:.0f} atrás")
+            parts.append(f"en frío {p(cold[0])} adelante y {p(cold[2])} atrás")
         wear = [ir[f"{c}wear{x}"] for c in names for x in ("L", "M", "R")]
         if all(w is not None for w in wear):
             parts.append(f"desgaste mínimo {min(wear) * 100:.0f} por ciento")

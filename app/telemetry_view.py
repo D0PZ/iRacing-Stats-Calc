@@ -13,6 +13,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from app.ibt_reader import telemetry_dir
 from app.paths import logs_dir
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
+from app.units import fmt_pressure
 
 PRIORITY_LABEL = {1: "ALTA", 2: "MEDIA", 3: "INFO"}
 DEFAULT_VOICE = "es-CL-CatalinaNeural"
@@ -262,7 +263,7 @@ class TelemetryView:
 
     def _tires(self, body, res):
         c = self.c
-        f = self._frame(body, "Neumáticos (temperatura en curva, °C)")
+        f = self._frame(body, "Neumáticos (superficie con la rueda cargada, °C)")
         layout = {"LF": (0, 0), "RF": (0, 1), "LR": (1, 0), "RR": (1, 1)}
         for key, (r, col) in layout.items():
             t = res.tires.get(key)
@@ -278,7 +279,8 @@ class TelemetryView:
                 order.reverse()
             tk.Label(box, text="   ".join(f"{n} {v:.0f}" for n, v in order), bg=c['bg_secondary'],
                      fg=c['text_primary'], font=('Consolas', 11)).pack(anchor=tk.W)
-            tk.Label(box, text=f"{t['pressure']:.0f} kPa en caliente  •  desgaste {t['wear']:.0f}%",
+            unit = getattr(res, "pressure_unit", "kPa")
+            tk.Label(box, text=f"{fmt_pressure(t['pressure'], unit)} {unit} en caliente  •  desgaste {t['wear']:.0f}%",
                      bg=c['bg_secondary'], fg=c['text_muted'], font=('Segoe UI', 9)).pack(anchor=tk.W)
         f.grid_columnconfigure(0, weight=1)
         f.grid_columnconfigure(1, weight=1)

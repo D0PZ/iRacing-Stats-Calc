@@ -14,6 +14,7 @@ import numpy as np
 
 from app.ibt_reader import IBTFile
 from app.references import save_references
+from app.units import PRESSURE_CLICK_KPA, PRESSURE_WORDS, fmt_pressure, pressure_unit
 from app.util import G, num
 from app.track_limits import (TrackLimitTracker, gps_lateral_offsets, replay_files,
                               save_tracker)
@@ -93,6 +94,7 @@ class AnalysisResult:
     corners: List[CornerResult] = field(default_factory=list)
     recommendations: List[Recommendation] = field(default_factory=list)
     tires: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    pressure_unit: str = "kPa"                                 # la del garage (la telemetría viene en kPa)
     fuel_per_lap: float = 0.0
     setup: Dict[str, str] = field(default_factory=dict)
     limit_zones: List[dict] = field(default_factory=list)
@@ -655,15 +657,44 @@ class TelemetryAnalyzer:
                 f"Límite en {z['name']} ({z['s']:.0f} m, lado {side})", " ".join(parts)))
 
     # -------------------------------------------------------- neumáticos
+    def _pit_carcass(self, c: str, valid: List[Lap]) -> Optional[dict]:
+        """
+        Carcasa O/M/I y presión que iRacing midió al entrar a pits después de vueltas válidas: es la misma
+        medición que muestra el garage (los canales tempC* solo cambian en ese momento).
+        """
+        for fi in sorted({l.file_idx for l in valid}, reverse=True):
+            f = self.files[fi]
+            arrs = [f.get(f"{c}tempC{s}") for s in ("L", "M", "R")]
+            if any(a is None for a in arrs):
+                continue
+            changes = np.flatnonzero(np.diff(arrs[1]) != 0)
+            changes = changes[changes >= min(l.i1 for l in valid if l.file_idx == fi) - 1]
+            if not len(changes):
+                continue
+            i = int(changes[-1]) + 1
+            L, M, R = (float(a[i]) for a in arrs)
+            outer, inner = (L, R) if c[0] == "L" else (R, L)
+            p = f.get(f"{c}pressure")
+            return {"outer": outer, "middle": M, "inner": inner, "hot": float(p[i]) if p is not None else None}
+        return None
+
     def _tires(self, valid: List[Lap]):
+        """
+        Por rueda: superficie con la rueda CARGADA (exterior de la curva: LatAccel > 0 es curva a la izquierda,
+        ahí trabajan las derechas), presión en caliente en pista, desgaste y la medición de carcasa en pits.
+        """
         res = self.result
         corners = {"LF": "Delantera izq.", "RF": "Delantera der.", "LR": "Trasera izq.", "RR": "Trasera der."}
+        res.pressure_unit = pressure_unit(self._setup_value("LeftFront", "StartingPressure") or "")
         for c in corners:
             vals = {"L": [], "M": [], "R": [], "P": [], "W": []}
+            outside = 1.0 if c[0] == "R" else -1.0
             for l in valid:
                 f = self.files[l.file_idx]
                 lat = f.get("LatAccel")
-                load = np.abs(lat[l.i0:l.i1]) > 0.8 * G if lat is not None else slice(None)
+                load = outside * lat[l.i0:l.i1] > 0.8 * G if lat is not None else None
+                if load is None or not load.any():
+                    load = slice(None)       # sin curvas hacia ese lado (óvalo): toda la vuelta
                 for side in ("L", "M", "R"):
                     a = f.get(f"{c}temp{side}")
                     if a is not None:
@@ -674,14 +705,15 @@ class TelemetryAnalyzer:
                 w = f.get(f"{c}wearM")
                 if w is not None:
                     vals["W"].append(w[l.i0:l.i1])
-            if not vals["M"]:
+            if not vals["M"] or not sum(len(a) for a in vals["M"]):
                 continue
             L, M, R = (float(np.mean(np.concatenate(vals[s]))) for s in ("L", "M", "R"))
             # Lado izquierdo del auto: L = exterior; lado derecho: L = interior
             outer, inner = (L, R) if c[0] == "L" else (R, L)
             res.tires[c] = {"name": corners[c], "outer": outer, "middle": M, "inner": inner,
                             "pressure": float(np.mean(np.concatenate(vals["P"]))) if vals["P"] else 0.0,
-                            "wear": float(np.min(np.concatenate(vals["W"]))) * 100 if vals["W"] else 100.0}
+                            "wear": float(np.min(np.concatenate(vals["W"]))) * 100 if vals["W"] else 100.0,
+                            "carcass": self._pit_carcass(c, valid)}
 
     def _fuel(self):
         res = self.result
@@ -887,7 +919,12 @@ class TelemetryAnalyzer:
                 f"{prefix}ablanda la barra trasera (ahora {rarb}) o sube un punto el ala trasera (ahora {wing}); "
                 f"si persiste, TC un clic más."))
 
-        # Neumáticos: camber y presión por temperaturas reales
+        # Neumáticos: con la medición de pits, el mismo modelo por rueda que el ingeniero en vivo
+        carcass = {c: t["carcass"] for c, t in res.tires.items() if t.get("carcass")}
+        if len(carcass) == 4:
+            self._tire_model_recs(carcass, prefix)
+            return
+        # Sin entrada a pits registrada: superficie con la rueda cargada, por eje y en términos generales
         for axle, pair in (("delantero", ("LF", "RF")), ("trasero", ("LR", "RR"))):
             ts = [res.tires[c] for c in pair if c in res.tires]
             if not ts:
@@ -904,18 +941,47 @@ class TelemetryAnalyzer:
                     "Neumáticos", 2, f"Falta camber en el eje {axle}",
                     f"El interior solo va {spread:.0f}°C sobre el exterior (ideal 5-8°C): el exterior trabaja "
                     f"de más. {prefix}agrega unos 0.3° de camber negativo (ahora {camber})."))
+        u, w = res.pressure_unit, PRESSURE_WORDS[res.pressure_unit]
         for c, t in res.tires.items():
             diff = t["middle"] - (t["inner"] + t["outer"]) / 2
             if diff > 3:
                 R.append(Recommendation(
                     "Neumáticos", 2, f"{t['name']}: presión alta",
-                    f"El centro va {diff:.0f}°C más caliente que los bordes ({t['pressure']:.0f} kPa en caliente). "
-                    f"{prefix}baja unos 5 kPa en frío."))
+                    f"El centro va {diff:.0f}°C más caliente que los bordes ({fmt_pressure(t['pressure'], u)} {w} en "
+                    f"caliente). {prefix}baja un clic en frío ({fmt_pressure(PRESSURE_CLICK_KPA, u)} {w})."))
             elif diff < -3:
                 R.append(Recommendation(
                     "Neumáticos", 2, f"{t['name']}: presión baja",
-                    f"El centro va {-diff:.0f}°C más frío que los bordes ({t['pressure']:.0f} kPa en caliente). "
-                    f"{prefix}sube unos 5 kPa en frío."))
+                    f"El centro va {-diff:.0f}°C más frío que los bordes ({fmt_pressure(t['pressure'], u)} {w} en "
+                    f"caliente). {prefix}sube un clic en frío ({fmt_pressure(PRESSURE_CLICK_KPA, u)} {w})."))
+
+    def _tire_model_recs(self, carcass: Dict[str, dict], prefix: str):
+        """Camber y presión exactos por rueda (pasos del garage, sensibilidades aprendidas en vivo)"""
+        from app.tire_model import TireModel, limits_for, read_setup, worked
+        from app.voice_commands import load_config
+        res = self.result
+        data = read_setup(self.info.get("CarSetup") or {})
+        for c, m in carcass.items():
+            data[c]["temps"] = (m["outer"], m["middle"], m["inner"])
+            if m.get("hot") is not None:
+                data[c]["hot"] = m["hot"]
+        track_temp = self._num(str((self.info.get("WeekendInfo") or {}).get("TrackSurfaceTemp", "")))
+        if not worked(data, track_temp):
+            res.recommendations.append(Recommendation(
+                "Neumáticos", 3, "Medición de neumáticos fría",
+                "Las gomas no alcanzaron temperatura antes de entrar a pits: esa medición no sirve para "
+                "ajustar camber ni presiones. Da al menos tres vueltas a ritmo."))
+            return
+        cfg = load_config()
+        model = TireModel(res.car, cfg.get("tire_targets"), limits_for(res.car, cfg.get("tire_limits")))
+        for c, r in model.recommend(data, res.track).items():
+            phrase = model.phrases({c: r})
+            if not phrase or phrase[0].startswith("Las cuatro"):
+                continue
+            text = prefix + phrase[0][0].lower() + phrase[0][1:] if prefix else phrase[0]
+            res.recommendations.append(Recommendation(
+                "Neumáticos", 2, f"{res.tires[c]['name']}: camber y presión",
+                text + " Medido en la carcasa al entrar a pits, como en el garage."))
 
     def _consistency_recs(self, valid: List[Lap]):
         res = self.result
@@ -1049,10 +1115,15 @@ def format_report(res: AnalysisResult) -> str:
             lines.append(f"  {z['name']:<20} {z['s']:6.0f} m  lado {'izq' if z['side'] > 0 else 'der'}  {laps}")
         lines.append("")
     if res.tires:
-        lines.append("NEUMÁTICOS (temperatura media en vueltas válidas, °C)")
+        lines.append("NEUMÁTICOS (superficie con la rueda cargada en vueltas válidas, °C)")
         for c, t in res.tires.items():
             lines.append(f"  {t['name']:<16} ext {t['outer']:5.1f}  centro {t['middle']:5.1f}  int {t['inner']:5.1f}  "
-                         f"presión {t['pressure']:5.1f} kPa  desgaste mín {t['wear']:.0f}%")
+                         f"presión {fmt_pressure(t['pressure'], res.pressure_unit):>5} {res.pressure_unit}  "
+                         f"desgaste mín {t['wear']:.0f}%")
+            k = t.get("carcass")
+            if k:
+                lines.append(f"  {'':<16} carcasa al entrar a pits: ext {k['outer']:5.1f}  centro {k['middle']:5.1f}  "
+                             f"int {k['inner']:5.1f}")
         lines.append("")
     lines.append("RECOMENDACIONES")
     prio = {1: "ALTA", 2: "MEDIA", 3: "INFO"}

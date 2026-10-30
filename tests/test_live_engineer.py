@@ -318,7 +318,7 @@ def test_tire_question_uses_pit_measurements(eng):
     assert "delantera izquierda 65, 76 y 78" in out
     assert "193 y 190 adelante" in out
     assert "Delantera izquierda: camber de -3.0 a -2.6" in out     # 13 °C vs objetivo 7
-    assert "presión de 183 a 175" in out                           # centro +4.5: tope de 8 kPa por salida
+    assert "presión de 183 a 176" in out                           # centro +4.5: tope de 1 psi (2 clics) por salida
     assert "Trasera izquierda: camber de -3.0 a -2.7" in out       # 9 °C vs objetivo 5
 
 

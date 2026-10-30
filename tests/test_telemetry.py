@@ -82,3 +82,43 @@ def test_track_limit_margin_with_known_offset():
 
 
 MIN_SAMPLES = 12
+
+
+def test_tires_use_loaded_wheel_and_pit_carcass(tmp_path, monkeypatch):
+    """Óvalo a la izquierda: trabajan las derechas. La carcasa medida al entrar a pits manda, en psi"""
+    import app.tire_model as tm
+    monkeypatch.setattr("app.telemetry_analyzer.save_tracker", lambda *a, **k: None)
+    monkeypatch.setattr("app.telemetry_analyzer.save_references", lambda *a, **k: None)
+    monkeypatch.setattr("app.progress.BASE", str(tmp_path / "progress"))
+    monkeypatch.setattr(tm, "BASE", str(tmp_path / "tire_model"))
+    channels, yaml_text = synthetic_session()
+    n = len(channels["Speed"])
+    lat = channels["LatAccel"]
+    carcass = {"LF": (65.0, 76.0, 78.0), "RF": (78.0, 76.0, 65.0), "LR": (67.0, 72.0, 76.0), "RR": (76.0, 72.0, 67.0)}
+    for c, (l, m, r) in carcass.items():
+        hot = np.where(lat > 0.8 * 9.81, 90.0, 60.0).astype(np.float32)     # superficie: caliente al cargar
+        for side, v in (("L", l), ("M", m), ("R", r)):
+            channels[f"{c}temp{side}"] = hot + (v - 70.0)
+            arr = np.full(n, 44.0, dtype=np.float32)
+            arr[-50:] = v                                                    # entrada a pits al final
+            channels[f"{c}tempC{side}"] = arr
+        channels[f"{c}pressure"] = np.full(n, 193.0, dtype=np.float32)
+    setup = ("CarSetup:\n Tires:\n"
+             + "".join(f"  {w}:\n   StartingPressure: 26.5 psi\n   LastHotPressure: 26.5 psi\n"
+                       for w in ("LeftFront", "RightFront", "LeftRear", "RightRear"))
+             + " Chassis:\n"
+             + "".join(f"  {w}:\n   Camber: -3.0 deg\n" for w in ("LeftFront", "RightFront", "LeftRear", "RightRear"))
+             + "  Front:\n   ArbSetting: 3\n   ToeIn: +1.3 mm\n  Rear:\n   ArbSetting: 4\n   WingAngle: 8\n...\n")
+    yaml_text = yaml_text[:yaml_text.index("CarSetup:")] + setup
+    path = str(tmp_path / "testcar_testring 2026-01-01 10-00-00.ibt")
+    write_ibt(path, channels, yaml_text)
+    res = TelemetryAnalyzer([path]).analyze()
+    assert res.pressure_unit == "psi"
+    # Superficie de la rueda cargada: la derecha solo con aceleración lateral alta (90 °C de base + 6);
+    # la izquierda nunca va por fuera en este óvalo y usa toda la vuelta
+    assert res.tires["RF"]["middle"] == pytest.approx(96.0)
+    assert res.tires["LF"]["middle"] < 90.0
+    assert res.tires["LF"]["carcass"]["inner"] == pytest.approx(78.0)
+    texts = [r.detail for r in res.recommendations if r.category == "Neumáticos"]
+    lf = next(t for t in texts if t.startswith("Delantera izquierda"))
+    assert "camber de -3.0 a -2.6" in lf and "presión de 26.5 a 25.5" in lf
