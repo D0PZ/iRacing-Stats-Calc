@@ -13,18 +13,13 @@ class RecordingMixin:
             return
         ir = self.ir
         active = ir["IsDiskLoggingActive"]
-        enabled = ir["IsDiskLoggingEnabled"]
-        if active is None or enabled is None:
+        if active is None:
             if self.on_track and not self._rec_warned:
                 self._rec_warned = True
                 self._rec_log("iRacing no informa el estado de la grabación (variables no disponibles)")
             return
-        if not enabled:
-            if self.on_track and not self._rec_warned:
-                self._rec_warned = True
-                self._rec_log("la telemetría de disco está desactivada en iRacing (irsdkEnableDisk=0)")
-                self.emit("La grabación de telemetría está desactivada en iRacing.", P_INFO, ttl=10)
-            return
+        # IsDiskLoggingEnabled llega en falso hasta que algo enciende la grabación (Alt+L o esta orden),
+        # aunque app.ini tenga irsdkEnableDisk=1: no sirve para decidir si mandar la orden
         if self.on_track:
             self._off_track_since = None
             if not active and self._tick_n % 60 == 0:   # reintentar como mucho una vez por segundo
@@ -39,7 +34,7 @@ class RecordingMixin:
             elif not active and self._rec_check_t is not None and time.time() - self._rec_check_t > 5 \
                     and not self._rec_warned:
                 self._rec_warned = True
-                self._rec_log("iRacing no aceptó la orden de grabar en 5 s")
+                self._rec_log("iRacing no aceptó la orden de grabar en 5 s (revisa irsdkEnableDisk=1 en app.ini)")
                 self.emit("No pude iniciar la grabación de telemetría: aprieta Alt mas L.", P_INFO, ttl=15)
         else:
             now = time.time()
