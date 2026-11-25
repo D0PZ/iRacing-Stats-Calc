@@ -165,10 +165,13 @@ class TelemetryAnalyzer:
                 seen.add(key)
                 unique.append(l)
         clean = [l.time for l in unique if not l.pit]
-        best = min(clean) if clean else min((l.time for l in unique), default=0)
+        # Un tramo corto que cruza la meta (de la grilla a la línea) no es una vuelta: no puede ser la referencia
+        floor = 0.8 * float(np.median(clean)) if clean else 0.0
+        real = [t for t in clean if t >= floor]
+        best = min(real) if real else min((l.time for l in unique), default=0)
         for l in unique:
             # Una salida leve (límites de pista, 1x) sigue siendo vuelta de ritmo; un trompo no
-            l.valid = (not l.pit) and l.time < best * 1.04 and l.incidents <= 1
+            l.valid = (not l.pit) and floor <= l.time < best * 1.04 and l.incidents <= 1
         # La primera vuelta de carrera (largada) no es representativa
         if self.result.session_type.lower().startswith("race") and unique:
             first = min(l.number for l in unique)

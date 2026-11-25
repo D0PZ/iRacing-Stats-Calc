@@ -5,12 +5,12 @@ Vistas de Telemetría (.ibt) e Ingeniero en Vivo para la interfaz principal
 import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import ttk, messagebox
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from app.ibt_reader import telemetry_dir
+from app import session_history
 from app.paths import logs_dir
 from app.telemetry_analyzer import TelemetryAnalyzer, group_session_files, fmt_lap, KMH
 from app.units import fmt_pressure
@@ -22,11 +22,6 @@ VOICES = [DEFAULT_VOICE, "es-CL-LorenzoNeural", "es-AR-TomasNeural", "es-AR-Elen
           "es-US-AlonsoNeural"]
 
 
-def default_telemetry_dir() -> str:
-    path = telemetry_dir()
-    return path if os.path.isdir(path) else os.path.expanduser("~")
-
-
 class TelemetryView:
     """Pantalla de análisis de telemetría"""
 
@@ -34,6 +29,8 @@ class TelemetryView:
         self.app = app
         self.c = app.colors
         self.result = None
+        self.result_path = None
+        self.sessions = []
 
     def show(self):
         app, c = self.app, self.c
@@ -44,45 +41,71 @@ class TelemetryView:
 
         bar = tk.Frame(main, bg=c['bg_dark'])
         bar.pack(fill=tk.X, pady=(0, 15))
-        btn = tk.Button(bar, text="📂 Cargar .ibt", command=lambda: self.load(main),
-                        bg=c['accent_blue'], fg=c['bg_dark'], font=('Segoe UI', 11, 'bold'),
-                        relief=tk.FLAT, cursor='hand2', padx=20, pady=8)
-        btn.pack(side=tk.LEFT)
-        tk.Label(bar, text="Los archivos de la misma sesión se combinan automáticamente. "
-                           "Graba en iRacing con Alt+L.",
-                 bg=c['bg_dark'], fg=c['text_muted'], font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=15)
+        tk.Label(bar, text="Sesión:", bg=c['bg_dark'], fg=c['text_secondary'],
+                 font=('Segoe UI', 11)).pack(side=tk.LEFT)
+        self.picker = ttk.Combobox(bar, state="readonly", width=60, font=('Segoe UI', 10))
+        self.picker.pack(side=tk.LEFT, padx=10)
+        self.picker.bind("<<ComboboxSelected>>", lambda e: self._picked())
+        tk.Label(bar, text="El ingeniero graba cada sesión solo; los archivos de la misma sesión se combinan.",
+                 bg=c['bg_dark'], fg=c['text_muted'], font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=5)
 
         self.body = tk.Frame(main, bg=c['bg_dark'])
         self.body.pack(fill=tk.BOTH, expand=True)
         if self.result:
             self.render(self.result)
+        else:
+            self._status("🔄 Buscando tus sesiones...")
 
-    def load(self, main):
-        path = filedialog.askopenfilename(
-            title="Seleccionar telemetría de iRacing",
-            filetypes=[("Telemetría iRacing", "*.ibt"), ("Todos", "*.*")],
-            initialdir=default_telemetry_dir())
-        if not path:
-            return
+        self.app.run_in_background(lambda: session_history.telemetry_sessions(session_history.scan_files()),
+                                   self._sessions_found)
+
+    def _status(self, text, color=None):
         for w in self.body.winfo_children():
             w.destroy()
-        status = tk.Label(self.body, text="⏳ Analizando telemetría...", bg=self.c['bg_dark'],
-                          fg=self.c['accent_yellow'], font=('Segoe UI', 12))
-        status.pack(pady=30)
+        tk.Label(self.body, text=text, bg=self.c['bg_dark'], fg=color or self.c['accent_yellow'],
+                 font=('Segoe UI', 12), justify=tk.LEFT).pack(pady=30)
 
-        def work():
-            try:
-                files = group_session_files(path)
-                res = TelemetryAnalyzer(files).analyze()
-                self.app.root.after(0, lambda: self._done(res, files))
-            except Exception as e:
-                err = str(e)
-                self.app.root.after(0, lambda: messagebox.showerror("Error", f"No se pudo analizar:\n{err}"))
-        threading.Thread(target=work, daemon=True).start()
+    def _sessions_found(self, sessions, error=None):
+        if not self.picker.winfo_exists():
+            return
+        if error is not None:
+            self._status(f"No se pudo leer la carpeta de telemetría: {error}", self.c['accent_red'])
+            return
+        self.sessions = sessions
+        self.picker["values"] = [s["label"] for s in sessions]
+        if not sessions:
+            self._status("Todavía no hay telemetría. Abre el ingeniero antes de subirte al auto:\n"
+                         "graba la sesión solo y aparece aquí cuando termina.", self.c['text_secondary'])
+            return
+        paths = [s["path"] for s in sessions]
+        if self.result_path in paths:
+            self.picker.current(paths.index(self.result_path))
+        else:  # la sesión más reciente, sin que tengas que elegirla
+            self.picker.current(0)
+            self.load(paths[0])
 
-    def _done(self, res, files):
+    def _picked(self):
+        path = self.sessions[self.picker.current()]["path"]
+        if path != self.result_path:
+            self.load(path)
+
+    def load(self, path):
+        self.result_path = path
+        self._status("⏳ Analizando telemetría...")
+
+        self.app.run_in_background(lambda: TelemetryAnalyzer(group_session_files(path)).analyze(),
+                                   lambda res, error: self._done(path, res, error))
+
+    def _done(self, path, res, error):
+        if path != self.result_path:
+            return  # elegiste otra sesión mientras se analizaba esta
+        if error is not None:
+            if self.body.winfo_exists():
+                self._status(f"No se pudo analizar esta sesión: {error}", self.c['accent_red'])
+            return
         self.result = res
-        self.app.loaded_file.set(f"🔧 {os.path.basename(files[-1])} ({len(files)} archivo/s)")
+        if not self.body.winfo_exists():
+            return  # cambiaste de pantalla; se muestra al volver
         for w in self.body.winfo_children():
             w.destroy()
         self.render(res)
@@ -404,9 +427,26 @@ class LiveEngineerView:
                                                                                           always=True),
                                   config=cfg)
             self.ptt.start()
-        self.thread = threading.Thread(target=self.engineer.run, daemon=True)
+        self.thread = threading.Thread(target=self._run_engineer, args=(self.engineer,), daemon=True)
         self.thread.start()
+        self._on_message("Ingeniero encendido. Esperando a iRacing: te habla por radio cuando te subas al auto.", 0)
         self.show()
+
+    def _run_engineer(self, engineer):
+        try:
+            engineer.run()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self._on_message(f"⚠️ El ingeniero se detuvo por un error: {e}", 0)
+            self.app.root.after(0, lambda: self._engineer_stopped(engineer))
+
+    def _engineer_stopped(self, engineer):
+        if engineer is not self.engineer:
+            return  # ya arrancaste otro
+        self.thread = None
+        if self.log_widget is not None and self.log_widget.winfo_exists():
+            self.show()  # el botón vuelve a "Iniciar"
 
     def _save_output(self, value):
         from app.voice_commands import load_config, save_config

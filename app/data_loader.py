@@ -1,55 +1,26 @@
 """
-Módulo para cargar y validar datos JSON de iRacing
+Módulo para cargar y clasificar los resultados de iRacing (formato de la API de iRacing)
 """
 
-import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 
 class DataLoader:
     """Clase para cargar y procesar datos de iRacing"""
-    
+
     def __init__(self):
         self.raw_data: List[Dict[str, Any]] = []
         self.races: List[Dict[str, Any]] = []
         self.practices: List[Dict[str, Any]] = []
         self.file_path: Optional[str] = None
-    
-    def load_file(self, file_path: str) -> bool:
-        """
-        Carga un archivo JSON de iRacing
-        
-        Args:
-            file_path: Ruta al archivo JSON
-            
-        Returns:
-            True si la carga fue exitosa, False en caso contrario
-        """
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # El JSON puede venir envuelto en arrays anidados
-            if isinstance(data, list):
-                if len(data) > 0 and isinstance(data[0], list):
-                    self.raw_data = data[0]
-                else:
-                    self.raw_data = data
-            else:
-                self.raw_data = [data]
-            
-            self.file_path = file_path
-            self._process_data()
-            return True
-            
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Error al parsear JSON: {e}")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Archivo no encontrado: {file_path}")
-        except Exception as e:
-            raise Exception(f"Error al cargar archivo: {e}")
-    
+
+    def load_sessions(self, sessions: List[Dict[str, Any]], source: Optional[str] = None):
+        """Carga resultados ya leídos (p. ej. el historial armado desde la telemetría)"""
+        self.raw_data = list(sessions)
+        self.file_path = source
+        self._process_data()
+
     def _process_data(self):
         """Procesa y clasifica los datos cargados"""
         self.races = []

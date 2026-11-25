@@ -4,13 +4,15 @@ Tema: Dark Mode
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 from typing import Optional
-import os
+import json
+import sys
+import threading
 
 # Importar módulos de la aplicación
+from app import session_history
 from app.data_loader import DataLoader
-from app.paths import app_root
 from app.stats_calculator import StatsCalculator
 from app.projections import ProjectionEngine
 from app.charts import ChartGenerator
@@ -60,8 +62,11 @@ class IracingStatsApp:
         self.chart_gen: Optional[ChartGenerator] = None
         self.ml_engine: Optional[MLEngine] = None
         
-        # Variable para el archivo cargado
-        self.loaded_file = tk.StringVar(value="Ningún archivo cargado")
+        # Estado del historial (se arma solo desde la telemetría)
+        self.loaded_file = tk.StringVar(value="🔄 Leyendo tus sesiones de iRacing...")
+        self.sessions_signature = None
+        self.scanning = False
+        self.on_welcome = False
         
         # Canvas activos para limpiar
         self.active_canvases = []
@@ -73,6 +78,9 @@ class IracingStatsApp:
         
         # Construir interfaz
         self.build_ui()
+
+        # Historial automático: al abrir y luego cada minuto (carreras nuevas aparecen solas)
+        self.refresh_sessions()
     
     def setup_dark_theme(self):
         """Configura el tema oscuro completo"""
@@ -186,7 +194,23 @@ class IracingStatsApp:
         
         # Separator
         style.configure('TSeparator', background=c['border'])
-        
+
+        # Combobox (selector de sesión de telemetría)
+        style.configure('TCombobox',
+                       fieldbackground=c['bg_card'],
+                       background=c['bg_card'],
+                       foreground=c['text_primary'],
+                       arrowcolor=c['text_secondary'],
+                       bordercolor=c['border'])
+        style.map('TCombobox',
+                 fieldbackground=[('readonly', c['bg_card'])],
+                 foreground=[('readonly', c['text_primary'])],
+                 selectbackground=[('readonly', c['bg_card'])],
+                 selectforeground=[('readonly', c['text_primary'])])
+        self.root.option_add('*TCombobox*Listbox.background', c['bg_card'])
+        self.root.option_add('*TCombobox*Listbox.foreground', c['text_primary'])
+        self.root.option_add('*TCombobox*Listbox.selectBackground', c['bg_hover'])
+
         # Canvas y ventana principal
         self.root.configure(bg=c['bg_dark'])
     
@@ -243,32 +267,13 @@ class IracingStatsApp:
                                  font=('Segoe UI', 11))
         subtitle_label.pack(anchor=tk.W)
         
-        # Botón de carga y archivo
-        load_frame = tk.Frame(header_frame, bg=c['bg_dark'])
-        load_frame.pack(side=tk.RIGHT)
-        
-        # Indicador de archivo
-        file_label = tk.Label(load_frame,
-                             textvariable=self.loaded_file,
-                             bg=c['bg_dark'],
-                             fg=c['text_muted'],
-                             font=('Segoe UI', 10))
-        file_label.pack(side=tk.RIGHT, padx=15)
-        
-        # Botón cargar
-        load_btn = tk.Button(load_frame,
-                            text="📂 Cargar JSON",
-                            command=self.load_file,
-                            bg=c['accent_blue'],
-                            fg=c['bg_dark'],
-                            font=('Segoe UI', 11, 'bold'),
-                            relief=tk.FLAT,
-                            cursor='hand2',
-                            padx=20,
-                            pady=8)
-        load_btn.pack(side=tk.RIGHT)
-        load_btn.bind('<Enter>', lambda e: load_btn.config(bg='#79C0FF'))
-        load_btn.bind('<Leave>', lambda e: load_btn.config(bg=c['accent_blue']))
+        # Estado del historial
+        status_label = tk.Label(header_frame,
+                                textvariable=self.loaded_file,
+                                bg=c['bg_dark'],
+                                fg=c['text_muted'],
+                                font=('Segoe UI', 10))
+        status_label.pack(side=tk.RIGHT, padx=15)
     
     def build_sidebar(self):
         """Construye el sidebar de navegación"""
@@ -379,7 +384,7 @@ class IracingStatsApp:
         footer.pack(fill=tk.X, pady=(10, 0))
         
         footer_label = tk.Label(footer,
-                               text="iRacing Stats Calculator v1.0 | Tema Oscuro | Datos de iRacing API",
+                               text="iRacing Stats Calculator v1.0 | Tema Oscuro | Datos de tu telemetría de iRacing",
                                bg=c['bg_dark'],
                                fg=c['text_muted'],
                                font=('Segoe UI', 9))
@@ -387,6 +392,7 @@ class IracingStatsApp:
     
     def clear_content(self):
         """Limpia el contenido actual"""
+        self.on_welcome = False
         # Limpiar canvases de matplotlib
         for canvas in self.active_canvases:
             try:
@@ -465,91 +471,93 @@ class IracingStatsApp:
         title.pack(pady=(0, 15))
         
         # Descripción
-        desc = tk.Label(frame,
-                       text="Carga un archivo JSON de iRacing para comenzar el análisis.",
+        if self.sessions_signature is None:
+            text = "Leyendo tus sesiones de iRacing..."
+            detail = "Las carreras salen de la telemetría que graba el ingeniero, no hay que cargar nada."
+        else:
+            text = "Todavía no hay carreras en tu telemetría."
+            detail = ("Abre el ingeniero antes de subirte al auto: graba la sesión solo\n"
+                      "y la carrera aparece aquí cuando termina.")
+        desc = tk.Label(frame, text=text,
                        bg=c['bg_dark'], fg=c['text_secondary'],
                        font=('Segoe UI', 14))
         desc.pack(pady=(0, 10))
-        
-        desc2 = tk.Label(frame,
-                        text="El archivo debe contener los resultados de tus sesiones\n(puedes obtenerlo desde la API de iRacing o herramientas externas)",
+
+        desc2 = tk.Label(frame, text=detail,
                         bg=c['bg_dark'], fg=c['text_muted'],
                         font=('Segoe UI', 11),
                         justify=tk.CENTER)
         desc2.pack(pady=(0, 40))
-        
-        # Botón grande
-        load_btn = tk.Button(frame,
-                            text="📂  Cargar Archivo JSON",
-                            command=self.load_file,
-                            bg=c['accent_blue'],
-                            fg=c['bg_dark'],
-                            font=('Segoe UI', 14, 'bold'),
-                            relief=tk.FLAT,
-                            cursor='hand2',
-                            padx=40,
-                            pady=15)
-        load_btn.pack()
-        load_btn.bind('<Enter>', lambda e: load_btn.config(bg='#79C0FF'))
-        load_btn.bind('<Leave>', lambda e: load_btn.config(bg=c['accent_blue']))
-    
-    def load_file(self):
-        """Abre diálogo para cargar archivo JSON"""
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar archivo JSON de iRacing",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialdir=app_root()
-        )
-        
-        if file_path:
+        self.on_welcome = True
+
+    def run_in_background(self, work, done):
+        """Corre work() en un hilo y entrega done(resultado, error) en el hilo de Tk.
+        Tk no se toca desde el hilo: falla si el mainloop todavía no arrancó."""
+        box = {}
+
+        def target():
             try:
-                self.data_loader.load_file(file_path)
-                
-                # Inicializar calculadores
-                self.stats_calc = StatsCalculator(self.data_loader)
-                self.projection = ProjectionEngine(self.stats_calc)
-                self.chart_gen = ChartGenerator(self.stats_calc, self.projection)
-                self.ml_engine = MLEngine(self.stats_calc)
-                
-                # Intentar cargar modelo existente primero
-                load_result = self.ml_engine.load_model()
-                model_loaded = load_result.get('success', False)
-                
-                # Entrenar/actualizar modelo ML con nuevos datos
-                ml_result = self.ml_engine.train_models()
-                
-                # Actualizar UI
-                filename = os.path.basename(file_path)
-                self.loaded_file.set(f"✅ {filename}")
-                
-                # Mostrar resumen
-                self.show_overview()
-                
-                # Mensaje de estado del modelo
-                if ml_result.get('success'):
-                    total_learned = self.ml_engine.total_races_learned
-                    sessions = self.ml_engine.training_sessions
-                    if model_loaded:
-                        ml_status = f"🤖 IA actualizada\n({total_learned} carreras aprendidas en {sessions} sesiones)"
-                    else:
-                        ml_status = f"🤖 IA entrenada\n({total_learned} carreras aprendidas)"
-                else:
-                    ml_status = "⚠️ IA no disponible"
-                
-                messagebox.showinfo("Éxito", 
-                    f"Archivo cargado correctamente!\n\n"
-                    f"Sesiones: {len(self.data_loader.get_all_sessions())}\n"
-                    f"Carreras: {len(self.data_loader.get_races())}\n"
-                    f"Prácticas: {len(self.data_loader.get_practices())}\n\n"
-                    f"{ml_status}")
-                
+                box['result'] = work()
             except Exception as e:
-                messagebox.showerror("Error", f"Error al cargar archivo:\n{str(e)}")
-    
+                box['error'] = e
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+
+        def wait():
+            if thread.is_alive():
+                self.root.after(100, wait)
+            else:
+                done(box.get('result'), box.get('error'))
+        self.root.after(100, wait)
+
+    def refresh_sessions(self):
+        """Relee el historial desde la telemetría (en segundo plano) y se reprograma cada minuto"""
+        self.root.after(60_000, self.refresh_sessions)
+        if self.scanning:
+            return
+        self.scanning = True
+        self.run_in_background(session_history.load_sessions, self._sessions_ready)
+
+    def _sessions_ready(self, sessions, error=None):
+        self.scanning = False
+        if error is not None:
+            print(f"[historial] {error}", flush=True)
+            self.loaded_file.set("⚠️ No se pudo leer la telemetría")
+            return
+        signature = json.dumps(sessions, sort_keys=True, default=str)
+        if signature == self.sessions_signature:
+            return
+        self.sessions_signature = signature
+        self.data_loader.load_sessions(sessions, session_history.telemetry_dir())
+        races = self.data_loader.get_races()
+
+        self.stats_calc = StatsCalculator(self.data_loader)
+        self.projection = ProjectionEngine(self.stats_calc)
+        self.chart_gen = ChartGenerator(self.stats_calc, self.projection)
+        self.ml_engine = MLEngine(self.stats_calc)
+        # El modelo guardado sirve si ya vio estas carreras; si hay nuevas, se reentrena
+        model_loaded = self.ml_engine.load_model().get('success', False)
+        X, _, _ = self.ml_engine.prepare_features()
+        if X is not None and not (model_loaded and len(X) == self.ml_engine.samples_used):
+            self.ml_engine.train_models()
+
+        practices = len(self.data_loader.get_practices())
+        self.loaded_file.set(f"✅ {len(races)} carrera{'s' if len(races) != 1 else ''} · "
+                             f"{practices} práctica{'s' if practices != 1 else ''} · telemetría local")
+        if self.on_welcome:
+            if races:
+                self.show_overview()
+            else:
+                self.show_welcome()
+
     def check_data_loaded(self) -> bool:
-        """Verifica si hay datos cargados"""
-        if not self.data_loader.is_loaded():
-            messagebox.showwarning("Aviso", "Primero debes cargar un archivo JSON")
+        """Verifica si hay carreras en el historial"""
+        if not self.data_loader.get_races():
+            if self.sessions_signature is None:
+                messagebox.showinfo("Aviso", "Estoy leyendo tus sesiones de iRacing, espera un momento.")
+            else:
+                messagebox.showinfo("Aviso", "Todavía no hay carreras en tu telemetría.\n"
+                                             "Abre el ingeniero antes de correr: graba la sesión solo.")
             return False
         return True
     
@@ -953,15 +961,20 @@ class IracingStatsApp:
         
         row3 = tk.Frame(pts_frame, bg=c['bg_card'])
         row3.pack(fill=tk.X)
-        
-        self.create_stat_card(row3, "ACTUAL", str(points_proj['current_total']), 
-                             f"Avg: {points_proj['avg_points_per_race']:.0f}/carrera", c['accent_green']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        self.create_stat_card(row3, "PROYECTADO", str(int(points_proj['projected_total'])), 
-                             "Escenario base", c['accent_blue']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        self.create_stat_card(row3, "OPTIMISTA", str(int(points_proj['optimistic_total'])), 
-                             "Mejor escenario", c['accent_green']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        self.create_stat_card(row3, "PESIMISTA", str(int(points_proj['pessimistic_total'])), 
-                             "Peor escenario", c['accent_red']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+
+        if not points_proj.get('races_counted'):
+            tk.Label(row3, text="Sin puntos de campeonato: la telemetría de iRacing no los trae "
+                                "(solo están en los resultados oficiales).",
+                     bg=c['bg_card'], fg=c['text_muted'], font=('Segoe UI', 10)).pack(anchor=tk.W)
+        else:
+            self.create_stat_card(row3, "ACTUAL", str(points_proj['current_total']),
+                                 f"Avg: {points_proj['avg_points_per_race']:.0f}/carrera", c['accent_green']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            self.create_stat_card(row3, "PROYECTADO", str(int(points_proj['projected_total'])), 
+                                 "Escenario base", c['accent_blue']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            self.create_stat_card(row3, "OPTIMISTA", str(int(points_proj['optimistic_total'])), 
+                                 "Mejor escenario", c['accent_green']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            self.create_stat_card(row3, "PESIMISTA", str(int(points_proj['pessimistic_total'])), 
+                                 "Peor escenario", c['accent_red']).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         
         # Áreas de mejora
         improve_frame = tk.LabelFrame(main, text=" 💡 Áreas de Mejora Recomendadas ",
@@ -1162,7 +1175,8 @@ class IracingStatsApp:
             if messagebox.askyesno("Confirmar", "¿Eliminar todo el aprendizaje guardado?\nEl modelo empezará de cero."):
                 result = self.ml_engine.delete_saved_model()
                 if result.get('success'):
-                    messagebox.showinfo("Éxito", "Modelo eliminado. Se entrenará de nuevo al cargar datos.")
+                    self.ml_engine.train_models()
+                    messagebox.showinfo("Éxito", "Aprendizaje borrado. El modelo se entrena de cero con tus carreras.")
                     self.show_ml_predictions()
         
         tk.Button(btn_frame, text="🗑️ Resetear Modelo", command=reset_model,
@@ -1444,6 +1458,11 @@ class IracingStatsApp:
 
 def main():
     """Función principal para iniciar la aplicación"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")   # emojis con la salida redirigida
+        except Exception:
+            pass
     root = tk.Tk()
     app = IracingStatsApp(root)
     root.mainloop()

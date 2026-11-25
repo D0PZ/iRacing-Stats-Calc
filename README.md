@@ -14,6 +14,11 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 ## ✨ Main Features
 
 ### 📊 Complete Statistics Analysis
+- **Fully automatic**: your race history is built from the telemetry the live engineer records, nothing to
+  export or load. Results come from the end of each race (position, incidents, laps), the grid from qualifying
+  and the SOF from the field's iRatings. The app re-reads `Documents/iRacing/telemetry` every minute, and the
+  history is cached in `data/session_history.json`, so deleting old `.ibt` files doesn't lose races.
+  Championship points are not in the telemetry (only in iRacing's official results)
 - **General statistics**: Total races, laps, incidents, championship points
 - **Positions**: Wins, podiums, Top 5, Top 10, DNFs
 - **Averages**: Starting position, finishing position, positions gained/lost
@@ -42,7 +47,8 @@ A comprehensive desktop application to analyze and visualize your iRacing statis
 - **Confidence intervals**: Prediction ranges with certainty levels
 
 ### 🔧 Telemetry & Setup Analysis (.ibt)
-- **Reads iRacing telemetry files** directly (record in-sim with `Alt+L`); split recordings of the same session are merged
+- **Opens your latest session automatically**; pick any other recorded session from the list.
+  Split recordings of the same session are merged
 - **Corner-by-corner analysis**: braking point, minimum/exit speed, time lost vs your best pass, understeer angle, wheelspin, lockups, ABS usage, track-limit excursions
 - **Theoretical best lap** from your best pass through each corner
 - **Tire temperatures**: surface O/M/I on the loaded (outside) wheel of each corner, plus the carcass O/M/I iRacing
@@ -136,23 +142,13 @@ Trained ML models are stored in `%APPDATA%\iRacingStatsCalc\ml_models`.
 
 ## 📖 Usage
 
-### 1. Export data from iRacing
-1. Go to [iRacing Members Site](https://members.iracing.com)
-2. Navigate to **Stats** → **Series Stats**
-3. Select the series you want to analyze
-4. Click **Export** to download the JSON file
+### 1. Race with the live engineer open
+Start the engineer (`ingeniero.bat` or the **🎙️ Ingeniero en Vivo** tab) before getting in the car: it records
+the telemetry on its own.
 
-### 2. Load data into the application
-1. Open iRacing Stats Calculator
-2. Click **📂 Load JSON**
-3. Select the exported file from iRacing
-4. Explore your statistics!
-
-### 3. Train the ML model
-1. Go to the **🤖 Machine Learning** tab
-2. Click **🎓 Train Model**
-3. The model will learn from your historical data
-4. Get personalized predictions and recommendations
+### 2. Open the app
+Your races, stats and the latest session's telemetry analysis show up on their own; new races appear within a
+minute of finishing. The ML model retrains by itself when there are new races (5 or more needed).
 
 ## 🛠️ Project Structure
 
@@ -165,7 +161,8 @@ iRacing-Stats-Calc/
 ├── build_exe.py               # PyInstaller build (create_icon.py makes icon.ico)
 ├── app/
 │   ├── gui.py                 # Tkinter interface
-│   ├── data_loader.py         # iRacing stats JSON loading
+│   ├── data_loader.py         # Race/practice classification of the results
+│   ├── session_history.py     # Race history built from the .ibt files (cached)
 │   ├── stats_calculator.py    # Race statistics
 │   ├── projections.py         # Trend projections
 │   ├── charts.py              # Matplotlib charts
